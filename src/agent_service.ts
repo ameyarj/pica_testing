@@ -272,14 +272,12 @@ ${outputText || "No output."}
   async executeTask(
     taskPrompt: string,
     threadId?: string
-  ): Promise<{ success: boolean; output?: any; error?: string; extractedData?: any }> {
+  ): Promise<{ success: boolean; output?: any; error?: string; extractedData?: any; analysisReason?: string }> { // Modified return type
     try {
       const result = await this.agent.generate(taskPrompt, {
         threadId: threadId || `test-${Date.now()}`,
         resourceId: `resource-${Date.now()}`
       });
-      console.log('Tool results:', JSON.stringify(result.toolResults, null, 2));
-      console.log('Agent output:', result.text);
 
       const outputText = result.text || "";
       const toolResults = result.toolResults || [];
@@ -292,23 +290,24 @@ ${outputText || "No output."}
           success: false,
           error: analysis.reason,
           output: outputText,
-          extractedData
+          extractedData,
+          analysisReason: analysis.reason 
         };
       }
       
-      const successfulOutput = outputText;
-
       return {
         success: true,
-        output: successfulOutput,
-        extractedData
+        output: outputText,
+        extractedData,
+        analysisReason: analysis.reason 
       };
 
     } catch (error: any) {
       console.error('Error in EnhancedAgentService.executeTask:', error);
       return {
         success: false,
-        error: error.message || "Unknown error during task execution"
+        error: error.message || "Unknown error during task execution",
+        analysisReason: "Task execution failed with an exception." 
       };
     }
   }

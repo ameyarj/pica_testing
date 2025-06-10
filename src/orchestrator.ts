@@ -4,6 +4,8 @@ import { KnowledgeRefiner } from './knowledge_refiner';
 import { ContextManager } from './context_manager';
 import { ConnectionDefinition, ModelDefinition, ActionResult } from './interface';
 import readline from 'readline/promises';
+import chalk from 'chalk'; 
+import * as diff from 'diff'; 
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -153,33 +155,56 @@ export class PicaosTestingOrchestrator {
     this.summarizeResults(connection, results);
   }
 
+  private displayKnowledgeDiff(oldKnowledge: string, newKnowledge: string): void {
+    const changes = diff.diffLines(oldKnowledge, newKnowledge);
+    let hasChanges = false;
+    const diffText = changes
+      .map(part => {
+        if (part.added) {
+          hasChanges = true;
+          return chalk.green(part.value.split('\n').map(l => `+ ${l}`).join('\n'));
+        }
+        if (part.removed) {
+          hasChanges = true;
+          return chalk.red(part.value.split('\n').map(l => `- ${l}`).join('\n'));
+        }
+        return ''; 
+      })
+      .filter(Boolean)
+      .join('');
+
+    if (hasChanges) {
+      console.log(chalk.yellow("\n\t🧠 Knowledge refined. Changes:"));
+      console.log(diffText);
+    } else {
+      console.log(chalk.gray("\t🤔 Knowledge refiner proposed no effective changes."));
+    }
+  }
   private async testActionWithRetries(action: ModelDefinition): Promise<ActionResult> {
     let currentKnowledge = action.knowledge;
     let attempts = 0;
     let lastError: string | undefined;
     let lastOutput: any;
     let extractedData: any;
+    let analysisReason: string | undefined;
 
     while (attempts < this.maxRetriesPerAction) {
       attempts++;
-      console.log(`\tAttempt ${attempts}/${this.maxRetriesPerAction}...`);
+      console.log(chalk.blue(`\tAttempt ${attempts}/${this.maxRetriesPerAction}...`));
 
       const context = this.contextManager.getContext();
       const actionToExecute = { ...action, knowledge: currentKnowledge };
       
       const taskPrompt = await this.agentService.generateTaskPrompt(actionToExecute, context);
-      console.log(`\n\t📋 Sending Prompt to Agent (Attempt ${attempts}):\n\t"""\n\t${taskPrompt.replace(/\n/g, "\n\t")}\n\t"""`);
+      
+      const promptForDisplay = taskPrompt.split('Knowledge:')[0] + 'Knowledge: [Omitted for brevity]';
+      console.log(chalk.gray(`\t📋 Prompt Sent:\n\t${promptForDisplay.replace(/\n/g, "\n\t")}`));
       
       const agentResult = await this.agentService.executeTask(taskPrompt);
-      console.log(`\tAgent Raw Output:\n\t"""\n\t${(agentResult.output || "No text output from agent.").replace(/\n/g, "\n\t")}\n\t"""`);
-      if (agentResult.error && !agentResult.success) {
-        console.warn(`\tAgent Reported Error: ${agentResult.error}`);
-      }
-      lastOutput = agentResult.output; 
-      extractedData = agentResult.extractedData; 
-
+      analysisReason = agentResult.analysisReason;
+      
       if (agentResult.success) {
-        console.log(`\t✅ SUCCESS: "${action.title}" on attempt ${attempts}`);
+        console.log(chalk.green.bold(`\t✅ SUCCESS:`), chalk.green(analysisReason || "Action completed successfully."));
         return {
           success: true,
           output: agentResult.output,
@@ -193,10 +218,14 @@ export class PicaosTestingOrchestrator {
       }
 
       lastError = agentResult.error || "Unknown error during agent execution";
-      console.warn(`\t❌ FAILED (Attempt ${attempts}): ${lastError}`);
+      console.log(chalk.red.bold(`\t❌ FAILED:`), chalk.red(analysisReason || "Action failed."));
+      if(agentResult.error) {
+        console.log(chalk.red(`\t   Error Details: ${agentResult.error}`));
+      }
+
 
       if (attempts < this.maxRetriesPerAction) {
-        console.log("\t💡 Refining knowledge for next attempt...");
+        console.log(chalk.yellow("\t💡 Refining knowledge..."));
         const refinedKnowledge = await this.knowledgeRefiner.refineKnowledge(
           currentKnowledge, 
           lastError,
@@ -204,23 +233,16 @@ export class PicaosTestingOrchestrator {
           context
         );
 
-        if (refinedKnowledge && refinedKnowledge.trim() !== "" && refinedKnowledge.trim().toUpperCase() !== "NO_CHANGE") {
-          if (refinedKnowledge.trim() !== currentKnowledge.trim()) {
-            console.log("\t✨ Knowledge has been refined. Differences:");
-            console.log(`\t--- OLD KNOWLEDGE (snippet) ---\n${currentKnowledge.substring(0, 200)}...\n\t-----------------------------`);
-            console.log(`\t--- NEW KNOWLEDGE (snippet) ---\n${refinedKnowledge.substring(0, 200)}...\n\t-----------------------------`);
-            currentKnowledge = refinedKnowledge.trim();
-            console.log("\t🔄 Retrying with updated knowledge...");
-          } else {
-            console.log("\t🤔 Knowledge refiner proposed no effective changes to the current knowledge. Retrying with same knowledge.");
-          }
+        if (refinedKnowledge && refinedKnowledge.trim().toUpperCase() !== "NO_CHANGE") {
+          this.displayKnowledgeDiff(currentKnowledge, refinedKnowledge);
+          currentKnowledge = refinedKnowledge.trim();
         } else {
-          console.log("\t🤷 Knowledge refiner did not suggest an update or suggestion was invalid. Retrying with same knowledge.");
+          console.log(chalk.gray("\t🤷 Knowledge refiner did not suggest an update. Retrying with same knowledge."));
         }
       }
     }
 
-    console.log(`\t❌ FINAL FAILURE for "${action.title}" after ${attempts} attempts.`);
+    console.log(chalk.red.bold(`\t🔥 FINAL FAILURE for "${action.title}" after ${attempts} attempts.`));
     return {
       success: false,
       error: lastError,
@@ -238,26 +260,26 @@ export class PicaosTestingOrchestrator {
     action: ModelDefinition, 
     firstPassResult: ActionResult 
   ): Promise<ActionResult> {
-    console.log(`\t🔄 Retrying "${action.title}" with full context (attempt ${firstPassResult.attempts + 1})...`);
+    console.log(chalk.cyan.bold(`\t🔄 Retrying with full context...`));
     
     const contextualContext = this.contextManager.getContextForFailedActions();
     
     const taskPrompt = await this.agentService.generateTaskPrompt(action, contextualContext);
-    console.log(`\n\t📋 Sending Prompt to Agent (Contextual Retry):\n\t"""\n\t${taskPrompt.replace(/\n/g, "\n\t")}\n\t"""`);
+    
+    const promptForDisplay = taskPrompt.split('Knowledge:')[0] + 'Knowledge: [Omitted for brevity]';
+    console.log(chalk.gray(`\t📋 Prompt Sent:\n\t${promptForDisplay.replace(/\n/g, "\n\t")}`));
 
     const agentResult = await this.agentService.executeTask(taskPrompt);
-    console.log(`\tAgent Raw Output (Contextual Retry):\n\t"""\n\t${(agentResult.output || "No text output from agent.").replace(/\n/g, "\n\t")}\n\t"""`);
-    if (agentResult.error && !agentResult.success) {
-      console.warn(`\tAgent Reported Error (Contextual Retry): ${agentResult.error}`);
-    }
+    const analysisReason = agentResult.analysisReason;
+
     if (agentResult.success) {
-      console.log(`\t✅ CONTEXTUAL SUCCESS: "${action.title}"`);
+      console.log(chalk.green.bold(`\t✅ CONTEXTUAL SUCCESS:`), chalk.green(analysisReason || `"${action.title}" succeeded with enhanced context.`));
       return {
         success: true,
         output: agentResult.output,
         originalKnowledge: firstPassResult.originalKnowledge, 
         finalKnowledge: action.knowledge,
-        attempts: 1,
+        attempts: 1, 
         actionTitle: action.title,
         modelName: action.modelName,
         extractedData: agentResult.extractedData,
@@ -265,7 +287,11 @@ export class PicaosTestingOrchestrator {
       };
     }
 
-    console.warn(`\t❌ CONTEXTUAL FAILURE for "${action.title}": ${agentResult.error || "Unknown error"}`);
+    console.log(chalk.red.bold(`\t❌ CONTEXTUAL FAILURE:`), chalk.red(analysisReason || `"${action.title}" failed even with enhanced context.`));
+    if (agentResult.error) {
+        console.log(chalk.red(`\t   Error Details: ${agentResult.error}`));
+    }
+    
     return {
       success: false,
       error: agentResult.error || "Failed even with enhanced context",
@@ -281,103 +307,65 @@ export class PicaosTestingOrchestrator {
   }
 
   private summarizeResults(connection: ConnectionDefinition, results: ActionResult[]): void {
-    console.log(`\n\n📊 Enhanced Test Summary for Platform: ${connection.name} 📊`);
-    
     const successes = results.filter(r => r.success);
     const failures = results.filter(r => !r.success && !(r.error || "").includes("Skipped"));
     const skipped = results.filter(r => (r.error || "").includes("Skipped"));
-    const contextualSuccesses = successes.filter(r => r.contextUsed);
+
+    const successOnFirstTry = successes.filter(r => r.attempts === 1 && !r.contextUsed).length;
+    const successWithRetry = successes.filter(r => r.attempts > 1 && !r.contextUsed).length;
+    const successWithContext = successes.filter(r => r.contextUsed).length;
+    
+    const refinedAndSucceeded = results.filter(r => r.success && r.finalKnowledge !== r.originalKnowledge).length;
+    const refinedAndFailed = results.filter(r => !r.success && r.finalKnowledge !== r.originalKnowledge).length;
+
+    console.log(chalk.bold.inverse(`\n\n📊 PicaOS Test Summary for: ${connection.name} 📊`));
+    
+    console.log(chalk.bold("\n--- Overall Performance ---"));
     const totalAttempted = results.length - skipped.length;
-
-
-    console.log("\n📈 Overall Statistics:");
-    console.log(`Total Actions Defined: ${results.length}`);
-    console.log(`Skipped (No Knowledge): ${skipped.length}`);
-    console.log(`Total Attempted: ${totalAttempted}`);
     if (totalAttempted > 0) {
-        console.log(`Successfully Completed: ${successes.length} (${Math.round(successes.length / totalAttempted * 100)}%)`);
-        console.log(`Failed: ${failures.length} (${Math.round(failures.length / totalAttempted * 100)}%)`);
+        const successRate = Math.round(successes.length / totalAttempted * 100);
+        console.log(`  Overall Success Rate: ${chalk.bold(successRate === 100 ? chalk.green(`${successRate}%`) : chalk.yellow(`${successRate}%`))} (${successes.length}/${totalAttempted} actions)`);
+        console.log(`    - ${chalk.green(`${successOnFirstTry} succeeded on first attempt.`)}`);
+        console.log(`    - ${chalk.yellow(`${successWithRetry} succeeded after auto-refinement.`)}`);
+        console.log(`    - ${chalk.cyan(`${successWithContext} succeeded on 2nd pass with context.`)}`);
     } else {
-        console.log("No actions were attempted.");
+        console.log(chalk.blue("No actions were attempted."));
     }
-    if (contextualSuccesses.length > 0) {
-      console.log(`  Successfully recovered with context (Second Pass): ${contextualSuccesses.length}`);
-    }
-
-    if (successes.length > 0) {
-      console.log("\n✅ Successful Actions:");
-      successes.forEach(result => {
-        let notes = [];
-        if (result.contextUsed) notes.push("Recovered in 2nd pass with context");
-        if (result.attempts > 1 && !result.contextUsed) notes.push(`Succeeded on attempt ${result.attempts > this.maxRetriesPerAction ? result.attempts - this.maxRetriesPerAction : result.attempts } of 1st pass`);
-        else if (result.attempts > 1 && result.contextUsed) notes.push (`Total attempts including 1st pass: ${result.attempts}`)
-
-        const noteString = notes.length > 0 ? ` (${notes.join('; ')})` : "";
-        console.log(`- ${result.actionTitle} (${result.modelName})${noteString}`);
-         if (result.finalKnowledge !== result.originalKnowledge && result.success) {
-            console.log(`  Succeeded with refined knowledge.`);
-        }
-      });
-    }
-
+    
     if (failures.length > 0) {
-      console.log("\n❌ Failed Actions:");
+      console.log(chalk.red(`\n--- ❌ Failed Actions (${failures.length}) ---`));
       failures.forEach(result => {
-        console.log(`- ${result.actionTitle} (${result.modelName})`);
-        console.log(`  Error: ${result.error}`);
-        console.log(`  Total Attempts: ${result.attempts}`);
-         if (result.finalKnowledge !== result.originalKnowledge) {
-            console.log(`  Failed with last attempted knowledge (original was refined).`);
-        } else {
-            console.log(`  Failed with original knowledge (no effective refinement or refinement disabled).`);
+        console.log(`  - ${chalk.bold(result.actionTitle)} (${result.modelName})`);
+        console.log(`    ${chalk.red.italic(`Error: ${result.error}`)}`);
+        if (result.finalKnowledge !== result.originalKnowledge) {
+          console.log(chalk.yellow.dim(`    (Failed after knowledge refinement)`));
         }
       });
     }
 
     if (skipped.length > 0) {
-      console.log("\n⏭️ Skipped Actions:");
-      skipped.forEach(result => {
-        console.log(`- ${result.actionTitle} (${result.modelName}): ${result.error}`);
-      });
+      console.log(chalk.gray(`\n--- ⏭️ Skipped Actions (${skipped.length}) ---`));
+      skipped.forEach(r => console.log(`  - ${r.actionTitle} (Reason: No knowledge)`));
     }
 
-    const actionsWithSuccessfulRefinements = results.filter(r => 
-      r.success && r.finalKnowledge && r.finalKnowledge !== r.originalKnowledge
-    );
-    const actionsWithAttemptedRefinements = results.filter(r =>
-        r.finalKnowledge && r.finalKnowledge !== r.originalKnowledge
-    );
-
-    if (actionsWithAttemptedRefinements.length > 0) {
-      console.log("\n🔄 Knowledge Refinement Statistics:");
-      console.log(`Actions where knowledge was refined at least once: ${actionsWithAttemptedRefinements.length}`);
-      console.log(`  Successfully completed after refinement: ${actionsWithSuccessfulRefinements.length}`);
-      if(actionsWithAttemptedRefinements.length > 0) {
-        console.log(`  Success rate for actions that underwent refinement: ${
-            Math.round(actionsWithSuccessfulRefinements.length / actionsWithAttemptedRefinements.length * 100)
-        }%`);
-      }
+    console.log(chalk.bold("\n--- 💡 Key Insights & Recommendations ---"));
+    if (refinedAndSucceeded > 0 || refinedAndFailed > 0) {
+        const refinementSuccessRate = Math.round(refinedAndSucceeded / (refinedAndSucceeded + refinedAndFailed) * 100);
+        console.log(`  - ${chalk.cyan('Knowledge Refinement:')} ${refinedAndSucceeded + refinedAndFailed} actions were refined. Success rate was ${chalk.bold(`${refinementSuccessRate}%`)}.`);
     }
-
-    console.log("\n💡 Recommendations:");
     if (failures.length > 0) {
-      console.log("- Review failed actions and their error messages. Check the last attempted knowledge.");
-      console.log("- Consider manually updating the base knowledge for actions that consistently fail or require many refinements.");
+        console.log(`  - ${chalk.red('Review failures:')} Manually inspect the ${failures.length} failed actions. The error messages above are your starting point.`);
+    }
+    if (successWithRetry > 0 || successWithContext > 0) {
+        console.log(`  - ${chalk.yellow('Update Base Knowledge:')} Actions that required retries or context to succeed are prime candidates for having their base knowledge updated in the platform.`);
     }
     if (skipped.length > 0) {
-      console.log("- Provide knowledge documentation for all skipped actions to enable testing.");
+        console.log(`  - ${chalk.gray('Document Skipped Actions:')} Add knowledge for the ${skipped.length} skipped actions to include them in testing.`);
     }
-    if (contextualSuccesses.length > 0) {
-      console.log("- Analyze actions recovered with context: their original knowledge might be missing dependency handling that context provided.");
-    }
-    if (actionsWithAttemptedRefinements.length > 0 && actionsWithSuccessfulRefinements.length < actionsWithAttemptedRefinements.length) {
-        console.log("- Investigate why some knowledge refinements did not lead to success; the refinement logic or prompts might need tuning.");
-    }
-
 
     const overallStatus = failures.length === 0 && totalAttempted > 0 ? 
-      "✨ All attempted actions completed successfully!" : 
-      (totalAttempted === 0 ? "🤷 No actions were attempted." : "⚠️ Some actions failed - review errors and knowledge.");
-    console.log(`\n${overallStatus}`);
+      chalk.green.inverse("\n✨ All attempted actions completed successfully! ✨") : 
+      (totalAttempted === 0 ? chalk.blue("\n🤷 No actions were attempted.") : chalk.red.inverse("\n⚠️ Some actions failed. Review the insights above."));
+    console.log(overallStatus);
   }
 }
