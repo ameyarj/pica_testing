@@ -277,13 +277,14 @@ export class EnhancedPicaosTestingOrchestrator {
   action: ModelDefinition,
   passNumber: number,
   dependencyGraph: any,
-  previousError?: string
+  previousError?: string,
 ): Promise<EnhancedActionResult> {
   let currentKnowledge = action.knowledge;
   let attempts = 0;
   let lastError: string | undefined;
   let extractedData: any;
   let strategyUsed: string | undefined;
+  let lastAgentResponse: string | undefined;
 
   const currentContext = this.contextManager.getContext();
   
@@ -304,16 +305,16 @@ export class EnhancedPicaosTestingOrchestrator {
   while (attempts < this.maxRetriesPerAction) {
     attempts++;
     console.log(chalk.blue(`   Attempt ${attempts}/${this.maxRetriesPerAction}...`));
-
     const context = this.contextManager.getContext();
     const { prompt, strategy } = await this.promptGenerator.generateAdaptivePrompt(
-      { ...action, knowledge: currentKnowledge },
-      context,
-      [],
-      attempts,
-      previousError || lastError,
-      dependencyGraph
-    );
+          { ...action, knowledge: currentKnowledge },
+          context,
+          [],
+          attempts,
+          previousError || lastError,
+          dependencyGraph,
+          lastAgentResponse 
+        );
     
     strategyUsed = strategy.tone;
     
@@ -364,7 +365,8 @@ export class EnhancedPicaosTestingOrchestrator {
         lastError,
         action,
         context,
-        prompt
+        prompt,
+        lastAgentResponse
       );
 
       if (refinement.knowledge && refinement.knowledge !== currentKnowledge) {

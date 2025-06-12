@@ -35,36 +35,135 @@ export class KnowledgeRefiner {
   }
 }
 
+private async analyzeAgentResponse(
+  agentResponse: string,
+  action: ModelDefinition,
+  context?: ExecutionContext
+): Promise<{
+  missingParams: string[];
+  requestedFromUser: string[];
+  shouldHaveUsedFromContext: Record<string, string>;
+}> {
+  const systemPrompt = `Analyze this agent response to identify what went wrong with the prompt.
+
+ANALYSIS GOALS:
+1. Identify parameters the agent asked the user for (like "please provide X")
+2. Check if those parameters were available in context
+3. Identify what the agent tried to do vs what it should have done
+4. Extract any specific IDs or values the agent mentioned needing
+
+BE VERY SPECIFIC about parameter names and values.`;
+
+  const contextInfo = this.buildDetailedContextInfo(context);
+  
+  const userPrompt = `Agent Response:
+${agentResponse}
+
+Action Path: ${action.path}
+Available Context:
+${contextInfo}
+
+Identify:
+1. What parameters did the agent ask for?
+2. Which of those were already available in context?
+3. What specific values should have been used?`;
+
+  try {
+    const { text } = await generateText({
+      model: this.llmModel,
+      system: systemPrompt,
+      prompt: userPrompt,
+    });
+
+    // Parse the analysis
+    const missingParams: string[] = [];
+    const requestedFromUser: string[] = [];
+    const shouldHaveUsedFromContext: Record<string, string> = {};
+
+    // Extract patterns like "provide the X" or "need the Y"
+    const requestPatterns = [
+      /(?:provide|specify|need|require|missing)\s+(?:the\s+)?(\w+)/gi,
+      /what\s+is\s+(?:the\s+)?(\w+)/gi,
+      /please\s+(?:provide|specify)\s+(?:the\s+)?(\w+)/gi
+    ];
+
+    for (const pattern of requestPatterns) {
+      let match;
+      while ((match = pattern.exec(agentResponse)) !== null) {
+        requestedFromUser.push(match[1]);
+      }
+    }
+
+    if (context?.availableIds) {
+      for (const requested of requestedFromUser) {
+        if (context.availableIds.has(requested)) {
+          const value = context.availableIds.get(requested)![0];
+          shouldHaveUsedFromContext[requested] = value;
+        }
+      }
+    }
+
+    const pathParams = action.path.match(/\{\{(\w+)\}\}/g) || [];
+    for (const param of pathParams) {
+      const paramName = param.replace(/[{}]/g, '');
+      if (!context?.availableIds?.has(paramName)) {
+        missingParams.push(paramName);
+      }
+    }
+
+    return {
+      missingParams,
+      requestedFromUser: [...new Set(requestedFromUser)],
+      shouldHaveUsedFromContext
+    };
+  } catch (error) {
+    console.error('Error analyzing agent response:', error);
+    return {
+      missingParams: [],
+      requestedFromUser: [],
+      shouldHaveUsedFromContext: {}
+    };
+  }
+}
+
   async refineKnowledge(
-    originalKnowledge: string,
-    errorMessage: string,
-    actionDetails: Readonly<ModelDefinition>,
-    context?: ExecutionContext,
-    failedPrompt?: string
-  ): Promise<{ knowledge?: string; promptStrategy?: string; contextMapping?: Record<string, string> }> {
-    try {
-      const systemPrompt = `You are an expert at fixing API action failures. You analyze errors and provide fixes for both the knowledge AND the prompting strategy.
+  originalKnowledge: string,
+  errorMessage: string,
+  actionDetails: Readonly<ModelDefinition>,
+  context?: ExecutionContext,
+  failedPrompt?: string,
+  agentResponse?: string  
+): Promise<{ knowledge?: string; promptStrategy?: string; contextMapping?: Record<string, string> }> {
+  try {
+    let responseAnalysis = null;
+    if (agentResponse) {
+      responseAnalysis = await this.analyzeAgentResponse(agentResponse, actionDetails, context);
+    }
+
+    const systemPrompt = `You are an expert at fixing API action failures. You analyze errors and agent responses to provide fixes for both the knowledge AND the prompting strategy.
 
 ANALYSIS FOCUS:
-1. **Missing Context Usage**: If error mentions "missing ID" or "need specific [field]" but context has that data, fix the knowledge to use context automatically
-2. **Bad Prompting**: If the prompt was too technical or unclear, suggest a more human-like approach
-3. **Parameter Issues**: Add specific parameter mappings based on available context
-4. **Missing Steps**: Add verification or data preparation steps if needed
+1. **Agent Behavior**: If the agent asked for parameters that were in context, the prompt needs to be more explicit
+2. **Missing Context Usage**: If error mentions "missing ID" but context has that data, make the prompt emphasize using context
+3. **Parameter Clarity**: If agent misunderstood what parameters to use, clarify in both knowledge and prompt
+4. **Response Analysis**: Use the agent's actual response to understand what went wrong
+
+PROMPT REFINEMENT RULES:
+- If agent asked user for IDs that were in context, create explicit instructions to use those IDs
+- Add concrete examples using actual context values
+- Make parameter usage crystal clear
 
 KNOWLEDGE REFINEMENT RULES:
 - Keep the original structure but add clarifications
 - If IDs are available in context, explicitly mention to use them
 - Add examples of valid data formats if format errors occurred
-- Include fallback instructions for edge cases
+- Include fallback instructions for edge cases`;
 
-OUTPUT FORMAT:
-Return structured refinements that address the specific error. Be precise and actionable.`;
+    const contextInfo = this.buildDetailedContextInfo(context);
+    const promptAnalysis = failedPrompt ? `\nFAILED PROMPT PREVIEW:\n${failedPrompt.substring(0, 500)}...\n` : '';
+    const errorAnalysis = this.analyzeErrorType(errorMessage);
 
-      const contextInfo = this.buildDetailedContextInfo(context);
-      const promptAnalysis = failedPrompt ? `\nFAILED PROMPT PREVIEW:\n${failedPrompt.substring(0, 500)}...\n` : '';
-      const errorAnalysis = this.analyzeErrorType(errorMessage);
-
-      const userPrompt = `${promptAnalysis}
+    let userPrompt = `${promptAnalysis}
 ERROR: ${errorMessage}
 ERROR TYPE: ${errorAnalysis.type}
 
@@ -72,46 +171,68 @@ ACTION: ${actionDetails.title} (${actionDetails.modelName})
 PLATFORM: ${actionDetails.connectionPlatform}
 PATH: ${actionDetails.path}
 
-${contextInfo}
+${contextInfo}`;
 
-ORIGINAL KNOWLEDGE:
+    if (responseAnalysis) {
+      userPrompt += `\n\nAGENT RESPONSE ANALYSIS:
+- Parameters agent asked for: ${responseAnalysis.requestedFromUser.join(', ')}
+- Should have used from context: ${JSON.stringify(responseAnalysis.shouldHaveUsedFromContext)}
+- Missing parameters: ${responseAnalysis.missingParams.join(', ')}\n`;
+    }
+
+    if (agentResponse) {
+      userPrompt += `\n\nAGENT'S ACTUAL RESPONSE (excerpt):
+${agentResponse.substring(0, 500)}...\n`;
+    }
+
+    userPrompt += `\n\nORIGINAL KNOWLEDGE:
 ${originalKnowledge}
 
-Provide specific refinements to fix this error.`;
+Provide specific refinements to fix this error. Focus on making the prompt use context values directly.`;
 
-      const { object: refinement } = await generateObject({
-        model: this.llmModel,
-        schema: RefinementSchema,
-        system: systemPrompt,
-        prompt: userPrompt,
-      });
+    const { object: refinement } = await generateObject({
+      model: this.llmModel,
+      schema: RefinementSchema,
+      system: systemPrompt,
+      prompt: userPrompt,
+    });
 
-      let enhancedKnowledge = refinement.knowledge;
-      if (enhancedKnowledge && refinement.contextMapping && Object.keys(refinement.contextMapping).length > 0) {
-        enhancedKnowledge += '\n\n## Context Mapping\n';
-        for (const [param, contextKey] of Object.entries(refinement.contextMapping)) {
-          enhancedKnowledge += `- Use ${contextKey} from context for ${param}\n`;
-        }
-      }
+    let promptStrategy = refinement.promptStrategy;
+    if (responseAnalysis && Object.keys(responseAnalysis.shouldHaveUsedFromContext).length > 0) {
+      promptStrategy = `CRITICAL: Use these exact values from context (DO NOT ask the user):
+${Object.entries(responseAnalysis.shouldHaveUsedFromContext)
+  .map(([param, value]) => `- ${param}: "${value}"`)
+  .join('\n')}
 
-      if (enhancedKnowledge && refinement.additionalSteps && refinement.additionalSteps.length > 0) {
-        enhancedKnowledge += '\n\n## Additional Steps\n';
-        refinement.additionalSteps.forEach((step, index) => {
-          enhancedKnowledge += `${index + 1}. ${step}\n`;
-        });
-      }
-
-      return {
-        knowledge: enhancedKnowledge?.trim() || undefined,
-        promptStrategy: refinement.promptStrategy?.trim() || undefined,
-        contextMapping: refinement.contextMapping
-      };
-
-    } catch (error) {
-      console.error('Error during knowledge refinement:', error);
-      return this.createFallbackRefinement(errorMessage, actionDetails, context);
+${promptStrategy || 'Execute the action using the above values directly.'}`;
     }
+
+    let enhancedKnowledge = refinement.knowledge;
+    if (enhancedKnowledge && refinement.contextMapping && Object.keys(refinement.contextMapping).length > 0) {
+      enhancedKnowledge += '\n\n## Context Mapping\n';
+      for (const [param, contextKey] of Object.entries(refinement.contextMapping)) {
+        enhancedKnowledge += `- Use ${contextKey} from context for ${param}\n`;
+      }
+    }
+
+    if (enhancedKnowledge && refinement.additionalSteps && refinement.additionalSteps.length > 0) {
+      enhancedKnowledge += '\n\n## Additional Steps\n';
+      refinement.additionalSteps.forEach((step, index) => {
+        enhancedKnowledge += `${index + 1}. ${step}\n`;
+      });
+    }
+
+    return {
+      knowledge: enhancedKnowledge?.trim() || undefined,
+      promptStrategy: promptStrategy?.trim() || undefined,
+      contextMapping: refinement.contextMapping
+    };
+
+  } catch (error) {
+    console.error('Error during knowledge refinement:', error);
+    return this.createFallbackRefinement(errorMessage, actionDetails, context);
   }
+}
 
   private analyzeErrorType(errorMessage: string): { type: string; details: string[] } {
     const error = errorMessage.toLowerCase();

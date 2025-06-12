@@ -428,7 +428,7 @@ Look for phrases like:
   async executeTask(
   taskPrompt: string,
   threadId?: string
-): Promise<{ success: boolean; output?: any; error?: string; extractedData?: any; analysisReason?: string }> {
+): Promise<{ success: boolean; output?: any; error?: string; extractedData?: any; analysisReason?: string; agentResponse?: string }> {
   try {
     // const knowledgeSeparator = '\n\n---\n';
     // const promptForDisplay = taskPrompt.split(knowledgeSeparator)[0];
@@ -456,7 +456,8 @@ Look for phrases like:
         error: analysis.reason,
         output: outputText,
         extractedData,
-        analysisReason: analysis.reason 
+        analysisReason: analysis.reason,
+        agentResponse: outputText 
       };
     }
     
@@ -464,7 +465,8 @@ Look for phrases like:
       success: true,
       output: outputText,
       extractedData,
-      analysisReason: analysis.reason 
+      analysisReason: analysis.reason,
+      agentResponse: outputText 
     };
 
   } catch (error: any) {
@@ -472,7 +474,8 @@ Look for phrases like:
     return {
       success: false,
       error: error.message || "Unknown error during task execution",
-      analysisReason: "Task execution failed with an exception." 
+      analysisReason: "Task execution failed with an exception." ,
+      agentResponse: error.message
     };
   }
 }

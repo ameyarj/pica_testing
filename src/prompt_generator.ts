@@ -28,27 +28,32 @@ export class EnhancedPromptGenerator {
 }
 
   async generateAdaptivePrompt(
-    action: ModelDefinition,
-    context: ExecutionContext,
-    history: readonly any[],
-    attemptNumber: number = 1,
-    previousError?: string,
-    dependencyGraph?: any
-  ): Promise<{ prompt: string; strategy: PromptStrategy }> {
-    
-    const strategy = this.determinePromptStrategy(action, context, attemptNumber, previousError);
-    
-    const examples = this.getRelevantExamples(action, context);
-    
-    const prompt = await this.buildPrompt(action, context, strategy, examples, dependencyGraph);
-    
-    const actionKey = `${action.connectionPlatform}:${action.modelName}:${action.actionName}`;
-    if (!this.promptHistory.has(actionKey)) {
-      this.promptHistory.set(actionKey, []);
-    }
-    
-    return { prompt, strategy };
+  action: ModelDefinition,
+  context: ExecutionContext,
+  history: readonly any[],
+  attemptNumber: number = 1,
+  previousError?: string,
+  dependencyGraph?: any,
+  previousResponse?: string 
+): Promise<{ prompt: string; strategy: PromptStrategy }> {
+  
+  const strategy = this.determinePromptStrategy(action, context, attemptNumber, previousError);
+  
+  const examples = this.getRelevantExamples(action, context);
+  
+  let prompt = await this.buildPrompt(action, context, strategy, examples, dependencyGraph);
+  
+  if (previousResponse) {
+    prompt = this.incorporateResponseRefinements(prompt, action, context, previousResponse);
   }
+  
+  const actionKey = `${action.connectionPlatform}:${action.modelName}:${action.actionName}`;
+  if (!this.promptHistory.has(actionKey)) {
+    this.promptHistory.set(actionKey, []);
+  }
+  
+  return { prompt, strategy };
+}
 
   private determinePromptStrategy(
   action: ModelDefinition,
@@ -190,6 +195,44 @@ export class EnhancedPromptGenerator {
   prompt += `\n\n### Execute Task\nUse Action ID: ${action._id} to complete this task.`;
   
   return prompt;
+}
+
+private incorporateResponseRefinements(
+  basePrompt: string,
+  action: ModelDefinition,
+  context: ExecutionContext,
+  previousResponse?: string
+): string {
+  if (!previousResponse) return basePrompt;
+  
+  const requestPatterns = [
+    /(?:provide|specify|need|require)\s+(?:the\s+)?(\w+Id)\b/gi,
+    /what\s+is\s+(?:the\s+)?(\w+Id)\b/gi
+  ];
+  
+  const requestedIds: string[] = [];
+  for (const pattern of requestPatterns) {
+    let match;
+    while ((match = pattern.exec(previousResponse)) !== null) {
+      requestedIds.push(match[1]);
+    }
+  }
+  
+  if (requestedIds.length > 0 && context.availableIds) {
+    let refinedPrompt = "⚠️ IMPORTANT - USE THESE VALUES (DO NOT ASK USER):\n";
+    
+    for (const reqId of requestedIds) {
+      if (context.availableIds.has(reqId)) {
+        const value = context.availableIds.get(reqId)![0];
+        refinedPrompt += `• ${reqId} = "${value}" (USE THIS EXACT VALUE)\n`;
+      }
+    }
+    
+    refinedPrompt += "\n" + basePrompt;
+    return refinedPrompt;
+  }
+  
+  return basePrompt;
 }
 
   private getConversationalOpening(action: ModelDefinition, context: ExecutionContext): string {

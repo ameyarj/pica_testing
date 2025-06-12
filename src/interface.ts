@@ -31,6 +31,8 @@ export interface ActionResult {
   dependencies?: string[];
   contextUsed?: boolean;
   extractedData?: any;
+  agentResponse?: string;
+  analysisReason?: string;
   
 }
 
