@@ -2,6 +2,7 @@ export interface ConnectionDefinition {
   _id: string;
   platform: string;
   name: string;
+  status: string;
 }
 
 export interface ModelDefinition {

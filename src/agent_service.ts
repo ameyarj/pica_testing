@@ -3,6 +3,7 @@ import { Memory } from '@mastra/memory';
 import { LibSQLStore } from '@mastra/libsql';
 import { Pica } from '@picahq/ai';
 import { openai } from "@ai-sdk/openai";
+import { anthropic } from "@ai-sdk/anthropic";
 import { generateText, generateObject, LanguageModel } from "ai";
 import { z } from 'zod';
 import { ModelDefinition, ExecutionContext } from './interface';
@@ -30,15 +31,25 @@ export class EnhancedAgentService {
   private agent!: Agent;
   private memory: Memory;
   private analysisModel: LanguageModel;
+  private useClaudeForAgent: boolean;
 
-  constructor(picaSecretKey: string, openAIApiKey: string) {
+  constructor(
+    picaSecretKey: string, 
+    openAIApiKey: string,
+    useClaudeForAgent: boolean = true
+  ) {
     if (!picaSecretKey) {
       throw new Error("PICA_SECRET_KEY is required for EnhancedAgentService.");
     }
-    if (!openAIApiKey) {
-      console.warn("OPENAI_API_KEY not provided; LLM interactions may fail.");
+    if (!openAIApiKey && !process.env.ANTHROPIC_API_KEY) {
+      console.warn("Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY provided; LLM interactions may fail.");
     }
-    this.analysisModel = openai("gpt-4-turbo");
+    
+    this.useClaudeForAgent = useClaudeForAgent && !!process.env.ANTHROPIC_API_KEY;
+    
+    this.analysisModel = this.useClaudeForAgent 
+      ? anthropic("claude-sonnet-4-20250514")
+      : openai("gpt-4.1");
 
     this.picaClient = new Pica(picaSecretKey, {
       connectors: ["*"],
@@ -56,6 +67,11 @@ export class EnhancedAgentService {
 
   private async initializeAgent(openAIApiKey: string) {
     const systemPrompt = await this.picaClient.generateSystemPrompt();
+    
+    const agentModel = this.useClaudeForAgent 
+      ? anthropic("claude-sonnet-4-20250514")
+      : openai("gpt-4.1");
+    
     this.agent = new Agent({
       name: "PicaTestingAgent",
       instructions: `${systemPrompt}
@@ -85,25 +101,28 @@ RESPONSE REQUIREMENTS:
 - Provide clear success/failure indication with specific details
 
 You must adapt to any platform (Google, Microsoft, Slack, etc.) and any model (emails, documents, files, etc.) generically.`,
-      model: openai("gpt-4.1"),
+      model: agentModel,
       tools: { ...this.picaClient.oneTool },
       memory: this.memory,
     });
+    
+    console.log(`Agent initialized with ${this.useClaudeForAgent ? 'Claude 3.5 Sonnet' : 'GPT-4.1'}`);
   }
 
   private getVerificationSteps(
-  action: Readonly<ModelDefinition>,
-  context: ExecutionContext
-): string | null {
-  const actionName = action.actionName.toLowerCase();
-  const needsId = action.path.includes('{{') && (!context.availableIds || context.availableIds.size === 0);
-  
-  if (needsId && (actionName.includes('get') || actionName.includes('update') || actionName.includes('delete'))) {
-    return `Important: If you need an ID for this action but don't have one, please first create or list resources to get a valid ID, then proceed with the main task.`;
+    action: Readonly<ModelDefinition>,
+    context: ExecutionContext
+  ): string | null {
+    const actionName = action.actionName.toLowerCase();
+    const needsId = action.path.includes('{{') && (!context.availableIds || context.availableIds.size === 0);
+    
+    if (needsId && (actionName.includes('get') || actionName.includes('update') || actionName.includes('delete'))) {
+      return `Important: If you need an ID for this action but don't have one, please first create or list resources to get a valid ID, then proceed with the main task.`;
+    }
+    
+    return null;
   }
-  
-  return null;
-}
+
   async generateTaskPrompt(
     action: Readonly<ModelDefinition>,
     context: ExecutionContext,
@@ -127,116 +146,116 @@ You must adapt to any platform (Google, Microsoft, Slack, etc.) and any model (e
     return finalPrompt;
   }
 
-private buildHumanLikePrompt(
-  action: Readonly<ModelDefinition>,
-  context: ExecutionContext,
-  history: Readonly<any[]>
-): string {
-  
-  let prompt = this.getConversationalOpener(action, context, history);
-  
-  if (context.availableIds && context.availableIds.size > 0) {
-    prompt += this.buildContextualInstructions(action, context);
-  } else {
-    prompt += this.buildStandaloneInstructions(action);
+  private buildHumanLikePrompt(
+    action: Readonly<ModelDefinition>,
+    context: ExecutionContext,
+    history: Readonly<any[]>
+  ): string {
+    
+    let prompt = this.getConversationalOpener(action, context, history);
+    
+    if (context.availableIds && context.availableIds.size > 0) {
+      prompt += this.buildContextualInstructions(action, context);
+    } else {
+      prompt += this.buildStandaloneInstructions(action);
+    }
+    
+    prompt += this.getRealisticDataSuggestions(action);
+    
+    return prompt;
   }
-  
-  prompt += this.getRealisticDataSuggestions(action);
-  
-  return prompt;
-}
 
-private getConversationalOpener(
-  action: Readonly<ModelDefinition>,
-  context: ExecutionContext,
-  history: Readonly<any[]>
-): string {
-  const actionName = action.actionName.toLowerCase();
-  const platform = action.connectionPlatform.replace('-', ' ');
-  
-  if (history.length > 0 && context.availableIds && context.availableIds.size > 0) {
+  private getConversationalOpener(
+    action: Readonly<ModelDefinition>,
+    context: ExecutionContext,
+    history: Readonly<any[]>
+  ): string {
+    const actionName = action.actionName.toLowerCase();
+    const platform = action.connectionPlatform.replace('-', ' ');
+    
+    if (history.length > 0 && context.availableIds && context.availableIds.size > 0) {
+      if (actionName.includes('create')) {
+        return `Great! Now I need you to create a new ${action.modelName.toLowerCase()} in ${platform}. `;
+      } else if (actionName.includes('get') || actionName.includes('retrieve')) {
+        return `Perfect! Now let's retrieve the ${action.modelName.toLowerCase()} we just worked with. `;
+      } else if (actionName.includes('update')) {
+        return `Excellent! Now I'd like you to update the ${action.modelName.toLowerCase()} with some new information. `;
+      } else if (actionName.includes('delete')) {
+        return `Now let's clean up by deleting the ${action.modelName.toLowerCase()} we created. `;
+      }
+    }
+    
     if (actionName.includes('create')) {
-      return `Great! Now I need you to create a new ${action.modelName.toLowerCase()} in ${platform}. `;
+      return `Hi! I need you to create a new ${action.modelName.toLowerCase()} in ${platform}. `;
+    } else if (actionName.includes('list')) {
+      return `Hello! Can you show me all the ${action.modelName.toLowerCase()} available in ${platform}? `;
+    } else {
+      return `Hi! I need help with ${action.title.toLowerCase()} in ${platform}. `;
+    }
+  }
+
+  private buildContextualInstructions(
+    action: Readonly<ModelDefinition>,
+    context: ExecutionContext
+  ): string {
+    let instructions = "";
+    
+    for (const [idType, values] of context.availableIds.entries()) {
+      const idValues = Array.isArray(values) ? values : [values];
+      if (idValues.length > 0 && action.path.includes(`{{${idType}}}`)) {
+        instructions += `Use the ${idType} "${idValues[0]}" that we just worked with. `;
+      }
+    }
+    
+    const actionName = action.actionName.toLowerCase();
+    if (actionName.includes('update') || actionName.includes('patch')) {
+      instructions += `Please make a meaningful change - maybe add today's date or update some content to show the action worked. `;
     } else if (actionName.includes('get') || actionName.includes('retrieve')) {
-      return `Perfect! Now let's retrieve the ${action.modelName.toLowerCase()} we just worked with. `;
-    } else if (actionName.includes('update')) {
-      return `Excellent! Now I'd like you to update the ${action.modelName.toLowerCase()} with some new information. `;
-    } else if (actionName.includes('delete')) {
-      return `Now let's clean up by deleting the ${action.modelName.toLowerCase()} we created. `;
+      instructions += `Just fetch the current data so we can see what's there. `;
     }
+    
+    return instructions;
   }
-  
-  if (actionName.includes('create')) {
-    return `Hi! I need you to create a new ${action.modelName.toLowerCase()} in ${platform}. `;
-  } else if (actionName.includes('list')) {
-    return `Hello! Can you show me all the ${action.modelName.toLowerCase()} available in ${platform}? `;
-  } else {
-    return `Hi! I need help with ${action.title.toLowerCase()} in ${platform}. `;
-  }
-}
 
-private buildContextualInstructions(
-  action: Readonly<ModelDefinition>,
-  context: ExecutionContext
-): string {
-  let instructions = "";
-  
-  for (const [idType, values] of context.availableIds.entries()) {
-    const idValues = Array.isArray(values) ? values : [values];
-    if (idValues.length > 0 && action.path.includes(`{{${idType}}}`)) {
-      instructions += `Use the ${idType} "${idValues[0]}" that we just worked with. `;
+  private buildStandaloneInstructions(action: Readonly<ModelDefinition>): string {
+    const actionName = action.actionName.toLowerCase();
+    
+    if (actionName.includes('create')) {
+      return `Please create it with some realistic sample data. Make it look professional and give it a meaningful name. `;
+    } else if (actionName.includes('list')) {
+      return `Just show me what's currently available. `;
+    } else if (actionName.includes('get')) {
+      return `If you need specific IDs, try to find or create a resource first, then retrieve it. `;
     }
+    
+    return `Please handle this request in the most logical way possible. `;
   }
-  
-  const actionName = action.actionName.toLowerCase();
-  if (actionName.includes('update') || actionName.includes('patch')) {
-    instructions += `Please make a meaningful change - maybe add today's date or update some content to show the action worked. `;
-  } else if (actionName.includes('get') || actionName.includes('retrieve')) {
-    instructions += `Just fetch the current data so we can see what's there. `;
-  }
-  
-  return instructions;
-}
 
-private buildStandaloneInstructions(action: Readonly<ModelDefinition>): string {
-  const actionName = action.actionName.toLowerCase();
-  
-  if (actionName.includes('create')) {
-    return `Please create it with some realistic sample data. Make it look professional and give it a meaningful name. `;
-  } else if (actionName.includes('list')) {
-    return `Just show me what's currently available. `;
-  } else if (actionName.includes('get')) {
-    return `If you need specific IDs, try to find or create a resource first, then retrieve it. `;
-  }
-  
-  return `Please handle this request in the most logical way possible. `;
-}
-
-private getRealisticDataSuggestions(action: Readonly<ModelDefinition>): string {
-  const actionName = action.actionName.toLowerCase();
-  const model = action.modelName.toLowerCase();
-  const platform = action.connectionPlatform.toLowerCase();
-  
-  if (!actionName.includes('create') && !actionName.includes('update')) {
-    return "";
-  }
-  
-  let suggestions = "Here are some realistic examples you could use: ";
-  
-  if (platform.includes('sheet') || platform.includes('excel')) {
-    if (model.includes('spreadsheet')) {
-      suggestions += `Title: "Monthly Sales Report - ${new Date().toLocaleDateString()}", `;
-    } else if (model.includes('values')) {
-      suggestions += `Data: Headers like "Name, Email, Department" with a few sample rows, `;
+  private getRealisticDataSuggestions(action: Readonly<ModelDefinition>): string {
+    const actionName = action.actionName.toLowerCase();
+    const model = action.modelName.toLowerCase();
+    const platform = action.connectionPlatform.toLowerCase();
+    
+    if (!actionName.includes('create') && !actionName.includes('update')) {
+      return "";
     }
-  } else if (platform.includes('doc') || platform.includes('word')) {
-    suggestions += `Title: "Project Planning Document - ${new Date().getFullYear()}", Content: "Meeting notes from today's discussion...", `;
-  } else if (platform.includes('email') || platform.includes('gmail')) {
-    suggestions += `Subject: "Test Email - ${new Date().toDateString()}", Body: "This is a test message sent via API", `;
+    
+    let suggestions = "Here are some realistic examples you could use: ";
+    
+    if (platform.includes('sheet') || platform.includes('excel')) {
+      if (model.includes('spreadsheet')) {
+        suggestions += `Title: "Monthly Sales Report - ${new Date().toLocaleDateString()}", `;
+      } else if (model.includes('values')) {
+        suggestions += `Data: Headers like "Name, Email, Department" with a few sample rows, `;
+      }
+    } else if (platform.includes('doc') || platform.includes('word')) {
+      suggestions += `Title: "Project Planning Document - ${new Date().getFullYear()}", Content: "Meeting notes from today's discussion...", `;
+    } else if (platform.includes('email') || platform.includes('gmail')) {
+      suggestions += `Subject: "Test Email - ${new Date().toDateString()}", Body: "This is a test message sent via API", `;
+    }
+    
+    return suggestions + "or something similar that makes sense for this context.";
   }
-  
-  return suggestions + "or something similar that makes sense for this context.";
-}
   
   private async analyzeExecutionResultWithLLM(
     outputText: string,
@@ -246,10 +265,12 @@ private getRealisticDataSuggestions(action: Readonly<ModelDefinition>): string {
 
 SUCCESS CRITERIA:
 - The agent's text explicitly states success AND provides evidence, like a resource ID or the requested data.
+- If JSON output is shown with resource IDs or successful response data, it's a success.
 
 FAILURE CRITERIA:
 - The text indicates failure, an error, or an inability to perform the action.
 - The text asks the user for information it should have had.
+- Error messages or failed API calls.
 
 Respond ONLY with a raw JSON object with "success" (boolean) and "reason" (string) keys.`;
 
@@ -274,7 +295,7 @@ ${outputText || "No text output."}
 
       const jsonResponse = JSON.parse(text);
       if (typeof jsonResponse.success === 'boolean' && typeof jsonResponse.reason === 'string') {
-        console.log(`ℹ️ LLM Analysis Result: Success=${jsonResponse.success}, Reason='${jsonResponse.reason}'`);
+        console.log(`ℹ️ Analysis Result: Success=${jsonResponse.success}, Reason='${jsonResponse.reason}'`);
         return jsonResponse;
       }
       throw new Error("Invalid JSON structure from analysis model.");
@@ -294,16 +315,17 @@ ${outputText || "No text output."}
 
     ### Rules of Extraction:
     1.  **Search the Text:** You MUST meticulously search the agent's text output for resource IDs. The ID might be in a sentence or inside a JSON code block.
-    2.  **Extract All IDs:** Find any key that looks like an ID (e.g., "id", "_id", "documentId", "revisionId"). Create a descriptive key for it in the 'ids' object.
-    3.  **Be Precise:** Do not guess or hallucinate data. If no ID is mentioned, return an empty object.
+    2.  **Extract All IDs:** Find any key that looks like an ID (e.g., "id", "_id", "documentId", "revisionId", "spreadsheetId", "sheetId", "messageId"). Create a descriptive key for it in the 'ids' object.
+    3.  **Look for JSON blocks:** Often the output contains JSON in code blocks with the created resource data.
+    4.  **Be Precise:** Do not guess or hallucinate data. If no ID is mentioned, return an empty object.
 
     **Example 1:**
     - Agent Text: "The new document ID is 1a2b3c-4d5e."
     - Your Output MUST be: \`{"ids": {"documentId": "1a2b3c-4d5e"}}\`
     
     **Example 2:**
-    - Agent Text: "Success! Here is the JSON: \`\`\`json\n{"documentId": "xyz-789"}\`\`\`"
-    - Your Output MUST be: \`{"ids": {"documentId": "xyz-789"}}\`
+    - Agent Text: "Success! Here is the JSON: \`\`\`json\n{"documentId": "xyz-789", "revisionId": "rev-123"}\`\`\`"
+    - Your Output MUST be: \`{"ids": {"documentId": "xyz-789", "revisionId": "rev-123"}}\`
 
     You MUST return ONLY the raw JSON object that conforms to the schema.`;
 
@@ -322,7 +344,7 @@ ${outputText || "No output."}
         system: systemPrompt,
       });
 
-      console.log('✅ LLM Extracted Data:', JSON.stringify(extractedData, null, 2));
+      console.log('✅ Extracted Data:', JSON.stringify(extractedData, null, 2));
       return extractedData;
 
     } catch (error) {
@@ -334,7 +356,7 @@ ${outputText || "No output."}
   async executeTask(
     taskPrompt: string,
     threadId?: string
-  ): Promise<{ success: boolean; output?: any; error?: string; extractedData?: any; analysisReason?: string }> { // Modified return type
+  ): Promise<{ success: boolean; output?: any; error?: string; extractedData?: any; analysisReason?: string }> {
     try {
       const result = await this.agent.generate(taskPrompt, {
         threadId: threadId || `test-${Date.now()}`,

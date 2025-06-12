@@ -1,117 +1,215 @@
 import { openai } from "@ai-sdk/openai";
-import { generateText } from "ai";
+import { anthropic } from "@ai-sdk/anthropic";
+import { generateText, generateObject, LanguageModel } from "ai";
+import { z } from 'zod';
 import { ModelDefinition, ExecutionContext } from './interface';
 
-export class KnowledgeRefiner {
-  private llmModel: any;
+const RefinementSchema = z.object({
+  knowledge: z.string().nullable().describe("Updated knowledge text, or null if no changes needed"),
+  promptStrategy: z.string().nullable().describe("New prompting approach suggestion, or null if no changes needed"),
+  contextMapping: z.record(z.string()).optional().describe("Explicit mapping of context IDs to parameters"),
+  additionalSteps: z.array(z.string()).optional().describe("Additional verification or preparation steps")
+});
 
-  constructor(openAIApiKey: string) {
-    if (!openAIApiKey) {
-      console.warn("OPENAI_API_KEY not provided; KnowledgeRefiner LLM interactions may fail.");
+export class KnowledgeRefiner {
+  private llmModel: LanguageModel;
+  private useClaudeForRefinement: boolean;
+
+  constructor(openAIApiKey: string, useClaudeForRefinement: boolean = true) {
+    if (!openAIApiKey && !process.env.ANTHROPIC_API_KEY) {
+      console.warn("Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY provided; KnowledgeRefiner may fail.");
     }
-    this.llmModel = openai("gpt-4.1"); 
+    
+    this.useClaudeForRefinement = useClaudeForRefinement && !!process.env.ANTHROPIC_API_KEY;
+    this.llmModel = this.useClaudeForRefinement
+      ? anthropic("claude-sonnet-4-20250514")
+      : openai("gpt-4.1");
   }
 
   async refineKnowledge(
-  originalKnowledge: string,
-  errorMessage: string,
-  actionDetails: Readonly<ModelDefinition>,
-  context?: ExecutionContext,
-  failedPrompt?: string
-): Promise<{ knowledge?: string; promptStrategy?: string }> {
-  try {
-    const systemPrompt = `You are an expert at fixing API action failures. You analyze errors and provide fixes for both the knowledge AND the prompting strategy.
+    originalKnowledge: string,
+    errorMessage: string,
+    actionDetails: Readonly<ModelDefinition>,
+    context?: ExecutionContext,
+    failedPrompt?: string
+  ): Promise<{ knowledge?: string; promptStrategy?: string; contextMapping?: Record<string, string> }> {
+    try {
+      const systemPrompt = `You are an expert at fixing API action failures. You analyze errors and provide fixes for both the knowledge AND the prompting strategy.
 
 ANALYSIS FOCUS:
 1. **Missing Context Usage**: If error mentions "missing ID" or "need specific [field]" but context has that data, fix the knowledge to use context automatically
 2. **Bad Prompting**: If the prompt was too technical or unclear, suggest a more human-like approach
 3. **Parameter Issues**: Add specific parameter mappings based on available context
+4. **Missing Steps**: Add verification or data preparation steps if needed
+
+KNOWLEDGE REFINEMENT RULES:
+- Keep the original structure but add clarifications
+- If IDs are available in context, explicitly mention to use them
+- Add examples of valid data formats if format errors occurred
+- Include fallback instructions for edge cases
 
 OUTPUT FORMAT:
-Return a JSON object with:
-- "knowledge": Updated knowledge (null if no change needed)
-- "promptStrategy": New prompting approach (null if no change needed)
+Return structured refinements that address the specific error. Be precise and actionable.`;
 
-CONTEXT USAGE RULES:
-- Always prefer context data over asking users
-- Include specific ID values when available
-- Make instructions actionable and specific`;
+      const contextInfo = this.buildDetailedContextInfo(context);
+      const promptAnalysis = failedPrompt ? `\nFAILED PROMPT PREVIEW:\n${failedPrompt.substring(0, 500)}...\n` : '';
+      const errorAnalysis = this.analyzeErrorType(errorMessage);
 
-    const contextInfo = this.buildDetailedContextInfo(context);
-    const promptAnalysis = failedPrompt ? `FAILED PROMPT:\n${failedPrompt.substring(0, 500)}...\n\n` : '';
-
-    const userPrompt = `${promptAnalysis}ERROR: ${errorMessage}
+      const userPrompt = `${promptAnalysis}
+ERROR: ${errorMessage}
+ERROR TYPE: ${errorAnalysis.type}
 
 ACTION: ${actionDetails.title} (${actionDetails.modelName})
 PLATFORM: ${actionDetails.connectionPlatform}
+PATH: ${actionDetails.path}
 
 ${contextInfo}
 
 ORIGINAL KNOWLEDGE:
 ${originalKnowledge}
 
-Fix the knowledge and/or suggest a better prompting strategy.`;
+Provide specific refinements to fix this error.`;
 
-    const { text } = await generateText({
-      model: this.llmModel,
-      system: systemPrompt,
-      prompt: userPrompt,
-    });
+      const { object: refinement } = await generateObject({
+        model: this.llmModel,
+        schema: RefinementSchema,
+        system: systemPrompt,
+        prompt: userPrompt,
+      });
 
-    try {
-      const result = JSON.parse(text);
-      return {
-        knowledge: result.knowledge?.trim() || null,
-        promptStrategy: result.promptStrategy?.trim() || null
-      };
-    } catch {
-      if (text.includes("context") || text.includes("ID") || text.length > 50) {
-        return { knowledge: text.trim() };
+      let enhancedKnowledge = refinement.knowledge;
+      if (enhancedKnowledge && refinement.contextMapping && Object.keys(refinement.contextMapping).length > 0) {
+        enhancedKnowledge += '\n\n## Context Mapping\n';
+        for (const [param, contextKey] of Object.entries(refinement.contextMapping)) {
+          enhancedKnowledge += `- Use ${contextKey} from context for ${param}\n`;
+        }
       }
-      return {};
-    }
 
-  } catch (error) {
-    console.error('Error during knowledge refinement:', error);
-    return {};
-  }
-}
+      if (enhancedKnowledge && refinement.additionalSteps && refinement.additionalSteps.length > 0) {
+        enhancedKnowledge += '\n\n## Additional Steps\n';
+        refinement.additionalSteps.forEach((step, index) => {
+          enhancedKnowledge += `${index + 1}. ${step}\n`;
+        });
+      }
 
-private buildDetailedContextInfo(context?: ExecutionContext): string {
-  if (!context) return "CONTEXT: None available";
-  
-  let info = "AVAILABLE CONTEXT:\n";
-  
-  if (context.availableIds && Object.keys(context.availableIds).length > 0) {
-    info += "IDs that can be used:\n";
-    for (const [type, ids] of Object.entries(context.availableIds)) {
-      const idList = Array.isArray(ids) ? ids : [ids];
-      info += `- ${type}: ${idList[0]} (use this directly)\n`;
+      return {
+        knowledge: enhancedKnowledge?.trim() || undefined,
+        promptStrategy: refinement.promptStrategy?.trim() || undefined,
+        contextMapping: refinement.contextMapping
+      };
+
+    } catch (error) {
+      console.error('Error during knowledge refinement:', error);
+      return this.createFallbackRefinement(errorMessage, actionDetails, context);
     }
   }
 
-  if (context.createdResources && Object.keys(context.createdResources).length > 0) {
-    info += "Resources created in this session:\n";
-    Object.keys(context.createdResources).forEach(type => {
-      info += `- ${type}: Available for reference\n`;
-    });
+  private analyzeErrorType(errorMessage: string): { type: string; details: string[] } {
+    const error = errorMessage.toLowerCase();
+    const details: string[] = [];
+    let type = 'unknown';
+
+    if (error.includes('missing') || error.includes('required') || error.includes('need')) {
+      type = 'missing_parameter';
+      const paramMatch = error.match(/(?:missing|required|need)\s+(\w+)/g);
+      if (paramMatch) details.push(...paramMatch);
+    } else if (error.includes('format') || error.includes('invalid') || error.includes('type')) {
+      type = 'format_error';
+    } else if (error.includes('not found') || error.includes('does not exist')) {
+      type = 'resource_not_found';
+    } else if (error.includes('permission') || error.includes('unauthorized')) {
+      type = 'permission_error';
+    } else if (error.includes('already exists')) {
+      type = 'duplicate_resource';
+    }
+
+    return { type, details };
   }
 
-  return info;
-}
+  private buildDetailedContextInfo(context?: ExecutionContext): string {
+    if (!context) return "CONTEXT: None available";
+    
+    let info = "AVAILABLE CONTEXT:\n";
+    
+    if (context.availableIds && context.availableIds.size > 0) {
+      info += "\nIDs that can be used:\n";
+      for (const [type, ids] of context.availableIds.entries()) {
+        const idList = Array.isArray(ids) ? ids : [ids];
+        info += `- ${type}: "${idList[0]}" (use this directly in the action)\n`;
+        if (idList.length > 1) {
+          info += `  Additional ${type}s: ${idList.slice(1).join(', ')}\n`;
+        }
+      }
+    }
 
-async getExecutionOrder(analysisPrompt: string): Promise<string[] | null> {
+    if (context.createdResources && context.createdResources.size > 0) {
+      info += "\nResources created in this session:\n";
+      for (const [type, resource] of context.createdResources.entries()) {
+        info += `- ${type}: Available with full data\n`;
+        if (typeof resource === 'object' && resource !== null) {
+          const keys = Object.keys(resource).slice(0, 5);
+          if (keys.length > 0) {
+            info += `  Keys: ${keys.join(', ')}\n`;
+          }
+        }
+      }
+    }
+
+    if (context.recentActions && context.recentActions.length > 0) {
+      const recentSuccesses = context.recentActions.filter(a => a.success).slice(-3);
+      if (recentSuccesses.length > 0) {
+        info += "\nRecent successful actions:\n";
+        recentSuccesses.forEach(action => {
+          info += `- ${action.actionTitle} (${action.modelName})\n`;
+        });
+      }
+    }
+
+    return info;
+  }
+
+  private createFallbackRefinement(
+    errorMessage: string,
+    actionDetails: ModelDefinition,
+    context?: ExecutionContext
+  ): { knowledge?: string; promptStrategy?: string } {
+    const error = errorMessage.toLowerCase();
+    let knowledge = actionDetails.knowledge;
+    let promptStrategy = undefined;
+
+    if (error.includes('missing') && error.includes('id')) {
+      if (context?.availableIds && context.availableIds.size > 0) {
+        const availableId = Array.from(context.availableIds.entries())[0];
+        knowledge += `\n\n## Using Context IDs\nIf a ${availableId[0]} is needed, use: "${availableId[1][0]}"`;
+        promptStrategy = "Emphasize using the specific ID from context immediately";
+      }
+    } else if (error.includes('format')) {
+      knowledge += "\n\n## Format Requirements\n- Ensure all dates use ISO format\n- Numbers should not be quoted\n- Boolean values must be true/false (not strings)";
+    }
+
+    return {
+      knowledge: knowledge !== actionDetails.knowledge ? knowledge : undefined,
+      promptStrategy
+    };
+  }
+
+  async getExecutionOrder(analysisPrompt: string): Promise<string[] | null> {
     try {
-      const systemPrompt = `You are a silent API workflow architect. Your only job is to determine the optimal execution order of API actions based on their function.
+      const systemPrompt = `You are a silent API workflow architect. Your only job is to determine the optimal execution order of API actions based on their function and dependencies.
 
 CRITICAL INSTRUCTIONS:
-- Analyze the user's list of actions.
-- Determine the logical sequence (e.g., create -> list -> update -> delete).
-- Your ONLY output MUST be a single, raw JSON array of the action "_id" strings in the correct execution order.
-- Do NOT include any explanations, commentary, or markdown.
+- Analyze the user's list of actions carefully
+- Determine the logical sequence considering:
+  1. Resource creation must happen before using those resources
+  2. List operations can help discover existing resources
+  3. Update/Delete operations require existing resources
+  4. Some actions may be independent and can run in parallel
+- Your ONLY output MUST be a single, raw JSON array of the action "_id" strings in the correct execution order
+- Do NOT include any explanations, commentary, or markdown
+- Consider that some platforms have hierarchical resources (e.g., spreadsheet -> sheet -> values)
 
 Example Output:
-["id_of_create_action", "id_of_list_action", "id_of_get_action", "id_of_update_action", "id_of_delete_action"]`;
+["id_of_create_spreadsheet", "id_of_create_sheet", "id_of_list_sheets", "id_of_update_values", "id_of_delete_sheet"]`;
 
       const { text: analysisResult } = await generateText({
         model: this.llmModel,
@@ -119,10 +217,11 @@ Example Output:
         prompt: analysisPrompt,
       });
 
-      const jsonMatch = analysisResult.match(/\[\s*".*?"\s*\]/s);
+      const jsonMatch = analysisResult.match(/\[\s*"[^"]+"\s*(?:,\s*"[^"]+"\s*)*\]/);
       if (jsonMatch && jsonMatch[0]) {
         const sortedIds = JSON.parse(jsonMatch[0]);
         if (Array.isArray(sortedIds) && sortedIds.length > 0) {
+          console.log(`Execution order determined: ${sortedIds.length} actions sorted`);
           return sortedIds as string[];
         }
       }
@@ -136,4 +235,39 @@ Example Output:
     }
   }
 
+  async generateSmartKnowledge(
+    action: ModelDefinition,
+    similarActions: ModelDefinition[],
+    platformContext: string
+  ): Promise<string | null> {
+    try {
+      const systemPrompt = `You are an API documentation expert. Generate clear, actionable knowledge for API actions based on similar actions and platform context.`;
+      
+      const userPrompt = `Generate knowledge for this action:
+Action: ${action.title}
+Method: ${action.action}
+Path: ${action.path}
+Platform: ${action.connectionPlatform}
+
+Similar actions from the same platform:
+${similarActions.slice(0, 3).map(a => `- ${a.title}: ${a.knowledge.substring(0, 200)}...`).join('\n')}
+
+Create knowledge that includes:
+1. Clear description
+2. Required and optional parameters
+3. Expected response format
+4. Common use cases`;
+
+      const { text } = await generateText({
+        model: this.llmModel,
+        system: systemPrompt,
+        prompt: userPrompt,
+      });
+
+      return text.trim();
+    } catch (error) {
+      console.error('Error generating smart knowledge:', error);
+      return null;
+    }
+  }
 }
