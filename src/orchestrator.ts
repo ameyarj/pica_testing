@@ -1,4 +1,3 @@
-// src/enhanced_orchestrator.ts
 import { PicaApiService } from './pica_api_service';
 import { EnhancedAgentService } from './agent_service';
 import { KnowledgeRefiner } from './knowledge_refiner';
@@ -19,6 +18,7 @@ interface EnhancedActionResult extends ActionResult {
   passNumber: number;
   strategyUsed?: string;
   dependenciesMet: boolean;
+  analysisReason?: string;
 }
 
 export class EnhancedPicaosTestingOrchestrator {
@@ -66,13 +66,12 @@ export class EnhancedPicaosTestingOrchestrator {
     }
   }
 
-  private displayConnections(connections: ConnectionDefinition[]): void {
-    console.log(chalk.bold("\n🔗 Available Platforms for Testing:"));
-    connections.forEach((conn, index) => {
-      const status = conn.status === 'Beta' ? chalk.yellow(' (Beta)') : '';
-      console.log(`${chalk.cyan(String(index + 1).padStart(2))}. ${chalk.bold(conn.name)} - ${conn.platform}${status}`);
-    });
-  }
+ private displayConnections(connections: ConnectionDefinition[]): void {
+  console.log(chalk.bold("\n🔗 Available Platforms for Testing:"));
+  connections.forEach((conn, index) => {
+    console.log(`${chalk.cyan(String(index + 1).padStart(2))}. ${chalk.bold(conn.name)} - ${conn.platform}`);
+  });
+}
 
   private async promptForConnectionSelection(connections: ConnectionDefinition[]): Promise<ConnectionDefinition | null> {
     while (true) {
@@ -88,11 +87,14 @@ export class EnhancedPicaosTestingOrchestrator {
   }
 
   private async testPlatform(connection: ConnectionDefinition): Promise<void> {
-    const modelDefinitions = await this.picaApiService.getModelDefinitions(connection._id);
+    let modelDefinitions = await this.picaApiService.getModelDefinitions(connection._id);
     if (!modelDefinitions || modelDefinitions.length === 0) {
       console.log(chalk.yellow(`No model definitions found for ${connection.name}.`));
       return;
     }
+
+    modelDefinitions = modelDefinitions.filter(action => action.supported !== false);
+    console.log(chalk.bold(`\n📋 Found ${modelDefinitions.length} supported actions for ${connection.name}`));
 
     console.log(chalk.bold(`\n📋 Found ${modelDefinitions.length} actions for ${connection.name}`));
     
@@ -272,94 +274,121 @@ export class EnhancedPicaosTestingOrchestrator {
   }
 
   private async executeActionWithSmartRetries(
-    action: ModelDefinition,
-    passNumber: number,
-    dependencyGraph: any,
-    previousError?: string
-  ): Promise<EnhancedActionResult> {
-    let currentKnowledge = action.knowledge;
-    let attempts = 0;
-    let lastError: string | undefined;
-    let extractedData: any;
-    let strategyUsed: string | undefined;
+  action: ModelDefinition,
+  passNumber: number,
+  dependencyGraph: any,
+  previousError?: string
+): Promise<EnhancedActionResult> {
+  let currentKnowledge = action.knowledge;
+  let attempts = 0;
+  let lastError: string | undefined;
+  let extractedData: any;
+  let strategyUsed: string | undefined;
 
-    while (attempts < this.maxRetriesPerAction) {
-      attempts++;
-      console.log(chalk.blue(`   Attempt ${attempts}/${this.maxRetriesPerAction}...`));
+  const currentContext = this.contextManager.getContext();
+  
+  const actionMetadata = this.dependencyAnalyzer.getActionMetadata(action._id, dependencyGraph);
+  if (actionMetadata && actionMetadata.requiresIds.length > 0) {
+    console.log(chalk.blue(`   Required IDs: ${actionMetadata.requiresIds.join(', ')}`));
+    
+    const missingIds = actionMetadata.requiresIds.filter(reqId => 
+      !currentContext.availableIds.has(reqId) || 
+      currentContext.availableIds.get(reqId)?.length === 0
+    );
+    
+    if (missingIds.length > 0) {
+      console.log(chalk.yellow(`   ⚠️ Missing required IDs: ${missingIds.join(', ')}`));
+    }
+  }
 
-      const context = this.contextManager.getContext();
-      const { prompt, strategy } = await this.promptGenerator.generateAdaptivePrompt(
-        { ...action, knowledge: currentKnowledge },
-        context,
-        [],
-        attempts,
-        previousError || lastError,
-        dependencyGraph
-      );
+  while (attempts < this.maxRetriesPerAction) {
+    attempts++;
+    console.log(chalk.blue(`   Attempt ${attempts}/${this.maxRetriesPerAction}...`));
+
+    const context = this.contextManager.getContext();
+    const { prompt, strategy } = await this.promptGenerator.generateAdaptivePrompt(
+      { ...action, knowledge: currentKnowledge },
+      context,
+      [],
+      attempts,
+      previousError || lastError,
+      dependencyGraph
+    );
+    
+    strategyUsed = strategy.tone;
+    
+    console.log(chalk.gray(`   Strategy: ${strategy.tone}, Context: ${strategy.contextLevel}`));
+    
+    const agentResult = await this.agentService.executeTask(prompt);
+    
+    if (agentResult.success) {
+      console.log(chalk.green(`   ✅ SUCCESS: ${agentResult.analysisReason || "Completed"}`));
+      this.promptGenerator.recordPromptResult(action._id, prompt, true);
       
-      strategyUsed = strategy.tone;
-      
-      const promptPreview = prompt.split('---')[0].trim();
-      console.log(chalk.gray(`   Strategy: ${strategy.tone}, Context: ${strategy.contextLevel}`));
-      console.log(chalk.gray(`   Prompt: ${promptPreview.substring(0, 150)}...`));
-      
-      const agentResult = await this.agentService.executeTask(prompt);
-      
-      if (agentResult.success) {
-        console.log(chalk.green(`   ✅ SUCCESS: ${agentResult.analysisReason || "Completed"}`));
-        this.promptGenerator.recordPromptResult(action._id, prompt, true);
-        
-        return {
-          success: true,
-          output: agentResult.output,
+      if (agentResult.extractedData) {
+        const fullResult: ActionResult = {
+          ...agentResult,
           originalKnowledge: action.knowledge,
-          finalKnowledge: currentKnowledge,
-          attempts,
+          attempts: attempts,
           actionTitle: action.title,
-          modelName: action.modelName,
-          extractedData: agentResult.extractedData,
-          passNumber,
-          strategyUsed,
-          dependenciesMet: true
+          modelName: action.modelName
         };
+        this.contextManager.updateContext(action, fullResult, agentResult.extractedData);
       }
-
-      lastError = agentResult.error || "Unknown error";
-      console.log(chalk.red(`   ❌ FAILED: ${agentResult.analysisReason || lastError}`));
-      this.promptGenerator.recordPromptResult(action._id, prompt, false);
-
-      if (attempts < this.maxRetriesPerAction) {
-        console.log(chalk.yellow("   💡 Refining approach..."));
-        
-        const refinement = await this.knowledgeRefiner.refineKnowledge(
-          currentKnowledge,
-          lastError,
-          action,
-          context,
-          prompt
-        );
-
-        if (refinement.knowledge && refinement.knowledge !== currentKnowledge) {
-          this.displayKnowledgeDiff(currentKnowledge, refinement.knowledge);
-          currentKnowledge = refinement.knowledge;
-        }
-      }
+      
+      return {
+        success: true,
+        output: agentResult.output,
+        originalKnowledge: action.knowledge,
+        finalKnowledge: currentKnowledge,
+        attempts,
+        actionTitle: action.title,
+        modelName: action.modelName,
+        extractedData: agentResult.extractedData,
+        passNumber,
+        strategyUsed,
+        dependenciesMet: true,
+        analysisReason: agentResult.analysisReason
+      };
     }
 
-    return {
-      success: false,
-      error: lastError,
-      originalKnowledge: action.knowledge,
-      finalKnowledge: currentKnowledge,
-      attempts,
-      actionTitle: action.title,
-      modelName: action.modelName,
-      extractedData,
-      passNumber,
-      strategyUsed,
-      dependenciesMet: true
-    };
+    lastError = agentResult.error || "Unknown error";
+    console.log(chalk.red(`   ❌ FAILED: ${agentResult.analysisReason || lastError}`));
+    this.promptGenerator.recordPromptResult(action._id, prompt, false);
+
+    if (attempts < this.maxRetriesPerAction) {
+      console.log(chalk.yellow("   💡 Refining approach..."));
+      
+      const refinement = await this.knowledgeRefiner.refineKnowledge(
+        currentKnowledge,
+        lastError,
+        action,
+        context,
+        prompt
+      );
+
+      if (refinement.knowledge && refinement.knowledge !== currentKnowledge) {
+        this.displayKnowledgeDiff(currentKnowledge, refinement.knowledge);
+        currentKnowledge = refinement.knowledge;
+      }
+    }
   }
+
+  return {
+    success: false,
+    error: lastError,
+    originalKnowledge: action.knowledge,
+    finalKnowledge: currentKnowledge,
+    attempts,
+    actionTitle: action.title,
+    modelName: action.modelName,
+    extractedData,
+    passNumber,
+    strategyUsed,
+    dependenciesMet: true,
+    analysisReason: lastError
+  };
+}
 
   private async executeActionWithMetaStrategy(
     action: ModelDefinition,
@@ -474,19 +503,26 @@ export class EnhancedPicaosTestingOrchestrator {
     console.log(`  Pass 3: ${chalk.cyan(`${pass3Success.length} successes`)} with meta-strategy`);
     
     if (failures.length > 0) {
-      console.log(chalk.bold.red(`\n❌ Failed Actions (${failures.length}):`));
-      failures.forEach(result => {
-        const metadata = dependencyGraph.nodes.find((n: any) => 
-          n.actionName === result.actionTitle && n.modelName === result.modelName
-        );
-        console.log(`  • ${result.actionTitle} (${result.modelName})`);
-        console.log(chalk.red(`    Error: ${result.error}`));
-        console.log(chalk.gray(`    Attempts: ${result.attempts}, Pass: ${result.passNumber}`));
-        if (!result.dependenciesMet) {
-          console.log(chalk.yellow(`    Dependencies were not met`));
-        }
-      });
+  console.log(chalk.bold.red(`\n❌ Failed Actions (${failures.length}):`));
+  failures.forEach(result => {
+    const metadata = dependencyGraph.nodes.find((n: any) => 
+      n.actionName === result.actionTitle && n.modelName === result.modelName
+    );
+    console.log(`  • ${result.actionTitle} (${result.modelName})`);
+    
+    const errorReason = result.analysisReason || result.error || "Unknown error";
+    console.log(chalk.red(`    Error: ${errorReason}`));
+    
+    console.log(chalk.gray(`    Attempts: ${result.attempts}, Pass: ${result.passNumber}`));
+    if (!result.dependenciesMet) {
+      console.log(chalk.yellow(`    Dependencies were not met`));
     }
+    
+    if (result.extractedData && Object.keys(result.extractedData.ids || {}).length > 0) {
+      console.log(chalk.gray(`    Extracted IDs: ${JSON.stringify(result.extractedData.ids)}`));
+    }
+  });
+}
     
     console.log(chalk.bold("\n💡 Insights & Recommendations:"));
     

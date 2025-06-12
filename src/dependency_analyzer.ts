@@ -25,10 +25,17 @@ export class EnhancedDependencyAnalyzer {
   private analysisModel: LanguageModel;
   
   constructor(private useClaudeForAnalysis: boolean = true) {
-    this.analysisModel = useClaudeForAnalysis 
-      ? anthropic("claude-sonnet-4-20250514")
-      : openai("gpt-4.1");
+  if (useClaudeForAnalysis && process.env.ANTHROPIC_API_KEY) {
+    try {
+      this.analysisModel = anthropic("claude-sonnet-4-20250514");
+    } catch (error) {
+      console.warn("Failed to initialize Claude for analysis, falling back to GPT-4.1");
+      this.analysisModel = openai("gpt-4.1");
+    }
+  } else {
+    this.analysisModel = openai("gpt-4.1");
   }
+}
 
   async analyzeDependencies(
     actions: ModelDefinition[],
@@ -43,11 +50,17 @@ ANALYSIS RULES:
 4. Some actions may have implicit dependencies (e.g., adding sheet to spreadsheet)
 5. Consider the action path - if it contains {{variableName}}, it requires that ID
 
+IMPORTANT CONSIDERATIONS:
+- UPDATE actions should depend on CREATE actions that create content, not just empty resources
+- If a CREATE action creates an empty resource, consider adding a "add content" action before UPDATE
+- DELETE actions should be last in the chain
+- Batch operations might need multiple resources to be meaningful
+
 PRIORITY GUIDELINES:
 - Priority 1: Independent CREATE actions
 - Priority 2: Dependent CREATE actions (e.g., create sheet in spreadsheet)
 - Priority 3: LIST/SEARCH actions
-- Priority 4: GET actions
+- Priority 4: GET actions  
 - Priority 5: UPDATE/PATCH actions
 - Priority 6: DELETE actions
 - Priority 7+: Complex dependent actions
@@ -87,25 +100,43 @@ Create a complete dependency graph with execution groups.`;
   private validateAndOptimizeGraph(graph: DependencyGraph, actions: ModelDefinition[]): DependencyGraph {
     const actionIds = new Set(actions.map(a => a._id));
     const graphIds = new Set(graph.nodes.map(n => n.id));
-    
+
+    // 1. Ensure every action from the platform exists in the graph.
+    // If the AI missed any, add a fallback node for it.
     for (const action of actions) {
       if (!graphIds.has(action._id)) {
+        console.warn(`AI analysis missed an action: "${action.title}". Adding with fallback logic.`);
         graph.nodes.push({
           id: action._id,
           actionName: action.actionName,
           modelName: action.modelName,
-          dependsOn: [],
+          dependsOn: [], // Start with no dependencies
           providesIds: this.inferProvidedIds(action),
-          requiresIds: this.inferRequiredIds(action),
+          requiresIds: this.inferRequiredIds(action), // Reliably get required IDs
           priority: this.getDefaultPriority(action),
           canRetry: true,
-          isOptional: false
+          isOptional: false // Assume it's not optional unless specified
         });
       }
     }
 
     for (const node of graph.nodes) {
-      node.dependsOn = node.dependsOn.filter(id => actionIds.has(id));
+      const actionDef = actions.find(a => a._id === node.id);
+      if (actionDef) {
+        const actualRequiredIds = this.inferRequiredIds(actionDef);
+        if (JSON.stringify(node.requiresIds) !== JSON.stringify(actualRequiredIds)) {
+            console.log(`Correcting dependencies for "${actionDef.title}": From [${node.requiresIds}] to [${actualRequiredIds}]`);
+        }
+        node.requiresIds = actualRequiredIds;
+      }
+
+      node.dependsOn = node.dependsOn.filter(id => {
+        const dependencyExists = actionIds.has(id);
+        if (!dependencyExists) {
+            console.warn(`Node "${node.actionName}" had an invalid dependency on non-existent action ID: ${id}. Removing it.`);
+        }
+        return dependencyExists;
+      });
     }
 
     this.detectAndBreakCircularDependencies(graph);
@@ -114,7 +145,6 @@ Create a complete dependency graph with execution groups.`;
 
     return graph;
   }
-
   private inferProvidedIds(action: ModelDefinition): string[] {
     const ids: string[] = [];
     const actionName = action.actionName.toLowerCase();

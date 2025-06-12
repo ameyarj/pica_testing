@@ -16,15 +16,24 @@ export class KnowledgeRefiner {
   private useClaudeForRefinement: boolean;
 
   constructor(openAIApiKey: string, useClaudeForRefinement: boolean = true) {
-    if (!openAIApiKey && !process.env.ANTHROPIC_API_KEY) {
-      console.warn("Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY provided; KnowledgeRefiner may fail.");
-    }
-    
-    this.useClaudeForRefinement = useClaudeForRefinement && !!process.env.ANTHROPIC_API_KEY;
-    this.llmModel = this.useClaudeForRefinement
-      ? anthropic("claude-sonnet-4-20250514")
-      : openai("gpt-4.1");
+  if (!openAIApiKey && !process.env.ANTHROPIC_API_KEY) {
+    console.warn("Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY provided; KnowledgeRefiner may fail.");
   }
+  
+  this.useClaudeForRefinement = useClaudeForRefinement && !!process.env.ANTHROPIC_API_KEY;
+  
+  if (this.useClaudeForRefinement) {
+    try {
+      this.llmModel = anthropic("claude-sonnet-4-20250514");
+    } catch (error) {
+      console.warn("Failed to initialize Claude for refinement, falling back to GPT-4.1");
+      this.llmModel = openai("gpt-4.1");
+      this.useClaudeForRefinement = false;
+    }
+  } else {
+    this.llmModel = openai("gpt-4.1");
+  }
+}
 
   async refineKnowledge(
     originalKnowledge: string,

@@ -16,6 +16,7 @@ export interface ModelDefinition {
   actionName: string;
   knowledge: string;
   path: string;
+  supported?: boolean; 
 }
 
 export interface ActionResult {

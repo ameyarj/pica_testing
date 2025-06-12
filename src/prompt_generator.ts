@@ -15,10 +15,17 @@ export class EnhancedPromptGenerator {
   private promptHistory: Map<string, { prompt: string; success: boolean }[]> = new Map();
 
   constructor(private useClaudeForPrompting: boolean = true) {
-    this.llmModel = useClaudeForPrompting
-      ? anthropic("claude-sonnet-4-20250514") 
-      : openai("gpt-4.1");
+  if (useClaudeForPrompting && process.env.ANTHROPIC_API_KEY) {
+    try {
+      this.llmModel = anthropic("claude-sonnet-4-20250514");
+    } catch (error) {
+      console.warn("Failed to initialize Claude for prompting, falling back to GPT-4.1");
+      this.llmModel = openai("gpt-4.1");
+    }
+  } else {
+    this.llmModel = openai("gpt-4.1");
   }
+}
 
   async generateAdaptivePrompt(
     action: ModelDefinition,
@@ -44,115 +51,146 @@ export class EnhancedPromptGenerator {
   }
 
   private determinePromptStrategy(
-    action: ModelDefinition,
-    context: ExecutionContext,
-    attemptNumber: number,
-    previousError?: string
-  ): PromptStrategy {
-    const actionName = action.actionName.toLowerCase();
-    const hasContext = context.availableIds && context.availableIds.size > 0;
-    
-    if (attemptNumber === 1) {
-      if (actionName.includes('create')) {
-        return {
-          tone: 'conversational',
-          emphasis: ['realistic data', 'professional naming'],
-          examples: true,
-          contextLevel: hasContext ? 'moderate' : 'minimal'
-        };
-      } else if (actionName.includes('get') || actionName.includes('list')) {
-        return {
-          tone: 'technical',
-          emphasis: ['fetch all data', 'include IDs'],
-          examples: false,
-          contextLevel: hasContext ? 'extensive' : 'minimal'
-        };
-      }
-    }
-    
-    if (previousError) {
-      if (previousError.includes('missing') || previousError.includes('required')) {
-        return {
-          tone: 'step-by-step',
-          emphasis: ['use context IDs', 'check requirements'],
-          examples: true,
-          contextLevel: 'extensive'
-        };
-      } else if (previousError.includes('format') || previousError.includes('invalid')) {
-        return {
-          tone: 'technical',
-          emphasis: ['exact format', 'data types'],
-          examples: true,
-          contextLevel: 'moderate'
-        };
-      }
-    }
-    
+  action: ModelDefinition,
+  context: ExecutionContext,
+  attemptNumber: number,
+  previousError?: string
+): PromptStrategy {
+  const actionName = action.actionName.toLowerCase();
+  const hasContext = context.availableIds && context.availableIds.size > 0;
+  const needsId = action.path.includes('{{');
+  
+  if (needsId && hasContext) {
     return {
       tone: 'contextual',
-      emphasis: ['complete the task', 'use available resources'],
-      examples: attemptNumber > 1,
-      contextLevel: hasContext ? 'extensive' : 'moderate'
+      emphasis: ['use the provided IDs from context', 'do not ask for IDs', 'IDs are already available'],
+      examples: true,
+      contextLevel: 'extensive'
     };
   }
+  
+  if (attemptNumber === 1) {
+    if (actionName.includes('create')) {
+      return {
+        tone: 'conversational',
+        emphasis: ['realistic data', 'professional naming'],
+        examples: true,
+        contextLevel: hasContext ? 'moderate' : 'minimal'
+      };
+    } else if (actionName.includes('get') || actionName.includes('list')) {
+      return {
+        tone: 'technical',
+        emphasis: ['fetch all data', 'include IDs'],
+        examples: false,
+        contextLevel: hasContext ? 'extensive' : 'minimal'
+      };
+    }
+  }
+  
+  if (previousError) {
+    if (previousError.includes('missing') || previousError.includes('required')) {
+      return {
+        tone: 'step-by-step',
+        emphasis: ['use context IDs', 'check requirements', 'IDs are in the context above'],
+        examples: true,
+        contextLevel: 'extensive'
+      };
+    } else if (previousError.includes('format') || previousError.includes('invalid')) {
+      return {
+        tone: 'technical',
+        emphasis: ['exact format', 'data types'],
+        examples: true,
+        contextLevel: 'moderate'
+      };
+    }
+  }
+  
+  return {
+    tone: 'contextual',
+    emphasis: ['complete the task', 'use available resources'],
+    examples: attemptNumber > 1,
+    contextLevel: hasContext ? 'extensive' : 'moderate'
+  };
+}
 
   private async buildPrompt(
-    action: ModelDefinition,
-    context: ExecutionContext,
-    strategy: PromptStrategy,
-    examples: string[],
-    dependencyGraph?: any
-  ): Promise<string> {
-    let prompt = '';
-    
-    switch (strategy.tone) {
-      case 'conversational':
-        prompt = this.getConversationalOpening(action, context);
-        break;
-      case 'step-by-step':
-        prompt = this.getStepByStepOpening(action, context);
-        break;
-      case 'technical':
-        prompt = this.getTechnicalOpening(action, context);
-        break;
-      case 'contextual':
-        prompt = this.getContextualOpening(action, context);
-        break;
-    }
-    
-    if (strategy.contextLevel !== 'minimal' && context.availableIds && context.availableIds.size > 0) {
-      prompt += this.buildContextSection(action, context, strategy.contextLevel);
-    }
-    
-    if (strategy.emphasis.length > 0) {
-      prompt += '\n\nKey points to remember:\n';
-      strategy.emphasis.forEach(point => {
-        prompt += `• ${point}\n`;
-      });
-    }
-    
-    if (strategy.examples && examples.length > 0) {
-      prompt += '\n\nHere are some examples that worked well:\n';
-      examples.forEach(example => {
-        prompt += `• ${example}\n`;
-      });
-    }
-    
-    if (dependencyGraph) {
-      const metadata = dependencyGraph.nodes.find((n: any) => n.id === action._id);
-      if (metadata && metadata.dependsOn.length > 0) {
-        prompt += '\n\nThis action depends on previous actions that should have provided:\n';
-        metadata.providesIds.forEach((id: string) => {
-          prompt += `• ${id} (check context for this)\n`;
-        });
+  action: ModelDefinition,
+  context: ExecutionContext,
+  strategy: PromptStrategy,
+  examples: string[],
+  dependencyGraph?: any
+): Promise<string> {
+  let prompt = '';
+  
+  const metadata = dependencyGraph?.nodes.find((n: any) => n.id === action._id);
+  const needsContext = metadata && metadata.requiresIds.length > 0;
+  
+  if (needsContext && context.availableIds && context.availableIds.size > 0) {
+    prompt = "**IMPORTANT CONTEXT FROM PREVIOUS ACTIONS:**\n";
+    for (const reqId of metadata.requiresIds) {
+      if (context.availableIds.has(reqId)) {
+        const values = context.availableIds.get(reqId)!;
+        const value = Array.isArray(values) ? values[0] : values;
+        prompt += `• ${reqId}: "${value}" (USE THIS - already created)\n`;
       }
     }
-    
-    prompt += `\n\n---\n### Technical Details\n${action.knowledge}`;
-    prompt += `\n\n### Execute Task\nUse Action ID: ${action._id} to complete this task.`;
-    
-    return prompt;
+    prompt += "\n";
   }
+  
+  switch (strategy.tone) {
+    case 'conversational':
+      prompt += this.getConversationalOpening(action, context);
+      break;
+    case 'step-by-step':
+      prompt += this.getStepByStepOpening(action, context);
+      break;
+    case 'technical':
+      prompt += this.getTechnicalOpening(action, context);
+      break;
+    case 'contextual':
+      prompt += this.getContextualOpening(action, context);
+      break;
+  }
+  
+  if (strategy.contextLevel !== 'minimal' && context.availableIds && context.availableIds.size > 0) {
+    prompt += this.buildContextSection(action, context, strategy.contextLevel);
+  }
+  
+  if (strategy.emphasis.length > 0) {
+    prompt += '\n\nKey points to remember:\n';
+    strategy.emphasis.forEach(point => {
+      prompt += `• ${point}\n`;
+    });
+  }
+  
+  if (strategy.examples && examples.length > 0) {
+    prompt += '\n\nHere are some examples that worked well:\n';
+    examples.forEach(example => {
+      prompt += `• ${example}\n`;
+    });
+  }
+  
+  if (dependencyGraph) {
+    const metadata = dependencyGraph.nodes.find((n: any) => n.id === action._id);
+    if (metadata && metadata.dependsOn.length > 0) {
+      prompt += '\n\nThis action depends on previous actions that should have provided:\n';
+      metadata.requiresIds.forEach((id: string) => {
+        const hasId = context.availableIds.has(id) && context.availableIds.get(id)!.length > 0;
+        if (hasId) {
+          const value = context.availableIds.get(id)![0];
+          prompt += `• ${id}: "${value}" (available in context - use this!)\n`;
+        } else {
+          prompt += `• ${id} (should be available from previous actions)\n`;
+        }
+      });
+    }
+  }
+  
+  prompt += `\n\n---\n### Technical Details\n${action.knowledge}`;
+  prompt += `\n\n### Execute Task\nUse Action ID: ${action._id} to complete this task.`;
+  
+  return prompt;
+}
 
   private getConversationalOpening(action: ModelDefinition, context: ExecutionContext): string {
     const platform = action.connectionPlatform.replace(/-/g, ' ');
@@ -187,43 +225,54 @@ export class EnhancedPromptGenerator {
   }
 
   private buildContextSection(
-    action: ModelDefinition, 
-    context: ExecutionContext, 
-    level: 'moderate' | 'extensive'
-  ): string {
-    let section = '\n\n📋 Available Context:\n';
-    
-    if (context.availableIds && context.availableIds.size > 0) {
-      section += 'You have these IDs from previous actions:\n';
-      for (const [type, ids] of context.availableIds.entries()) {
-        const idList = Array.isArray(ids) ? ids : [ids];
-        section += `• ${type}: "${idList[0]}"`;
-        if (idList.length > 1) {
-          section += ` (and ${idList.length - 1} more)`;
+  action: ModelDefinition, 
+  context: ExecutionContext, 
+  level: 'moderate' | 'extensive'
+): string {
+  let section = '\n\n📋 Session Context (Important - each request is a new chat):\n';
+  
+  if (context.availableIds && context.availableIds.size > 0) {
+    section += 'IDs from previous actions in this testing session:\n';
+    for (const [type, ids] of context.availableIds.entries()) {
+      const idList = Array.isArray(ids) ? ids : [ids];
+      section += `• ${type}: "${idList[0]}" - USE THIS DIRECTLY, it already exists\n`;
+      if (idList.length > 1) {
+        section += `  Additional ${type}s: ${idList.slice(1).map(id => `"${id}"`).join(', ')}\n`;
+      }
+    }
+    section += '\nThese resources were created in earlier actions. You should use these IDs directly without creating new ones.\n';
+  }
+  
+  if (level === 'extensive') {
+    if (context.createdResources && context.createdResources.size > 0) {
+      section += '\nResources created in this session:\n';
+      for (const [key, resource] of context.createdResources.entries()) {
+        section += `• ${key}`;
+        if (typeof resource === 'object' && resource !== null && resource.id) {
+          section += ` (ID: ${resource.id})`;
         }
         section += '\n';
       }
     }
     
-    if (level === 'extensive') {
-      if (context.createdResources && context.createdResources.size > 0) {
-        section += '\nCreated resources you can reference:\n';
-        for (const [key, _] of context.createdResources.entries()) {
-          section += `• ${key}\n`;
+    const recentSuccesses = context.recentActions.filter(a => a.success).slice(-3);
+    if (recentSuccesses.length > 0) {
+      section += '\nWhat happened in recent actions:\n';
+      recentSuccesses.forEach((action, idx) => {
+        section += `${idx + 1}. ${action.actionTitle} - Completed successfully`;
+        if (action.output && typeof action.output === 'string') {
+          const idMatch = action.output.match(/"id"\s*:\s*"([^"]+)"/);
+          if (idMatch) {
+            section += ` (created ID: ${idMatch[1]})`;
+          }
         }
-      }
-      
-      const recentSuccesses = context.recentActions.filter(a => a.success).slice(-3);
-      if (recentSuccesses.length > 0) {
-        section += '\nRecent successful actions:\n';
-        recentSuccesses.forEach(action => {
-          section += `• ${action.actionTitle} ✓\n`;
-        });
-      }
+        section += '\n';
+      });
     }
-    
-    return section;
   }
+  
+  return section;
+}
 
   private getRelevantExamples(action: ModelDefinition, context: ExecutionContext): string[] {
     const examples: string[] = [];

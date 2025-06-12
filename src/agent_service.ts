@@ -7,6 +7,7 @@ import { anthropic } from "@ai-sdk/anthropic";
 import { generateText, generateObject, LanguageModel } from "ai";
 import { z } from 'zod';
 import { ModelDefinition, ExecutionContext } from './interface';
+import chalk from 'chalk';
 
 const ExtractedDataSchema = z.object({
     ids: z.record(z.string())
@@ -34,36 +35,44 @@ export class EnhancedAgentService {
   private useClaudeForAgent: boolean;
 
   constructor(
-    picaSecretKey: string, 
-    openAIApiKey: string,
-    useClaudeForAgent: boolean = true
-  ) {
-    if (!picaSecretKey) {
-      throw new Error("PICA_SECRET_KEY is required for EnhancedAgentService.");
-    }
-    if (!openAIApiKey && !process.env.ANTHROPIC_API_KEY) {
-      console.warn("Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY provided; LLM interactions may fail.");
-    }
-    
-    this.useClaudeForAgent = useClaudeForAgent && !!process.env.ANTHROPIC_API_KEY;
-    
-    this.analysisModel = this.useClaudeForAgent 
-      ? anthropic("claude-sonnet-4-20250514")
-      : openai("gpt-4.1");
-
-    this.picaClient = new Pica(picaSecretKey, {
-      connectors: ["*"],
-      serverUrl: "https://development-api.picaos.com",
-    });
-
-    this.memory = new Memory({
-      storage: new LibSQLStore({
-        url: 'file::memory:',
-      }),
-    });
-
-    this.initializeAgent(openAIApiKey);
+  picaSecretKey: string, 
+  openAIApiKey: string,
+  useClaudeForAgent: boolean = true
+) {
+  if (!picaSecretKey) {
+    throw new Error("PICA_SECRET_KEY is required for EnhancedAgentService.");
   }
+  if (!openAIApiKey && !process.env.ANTHROPIC_API_KEY) {
+    console.warn("Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY provided; LLM interactions may fail.");
+  }
+  
+  this.useClaudeForAgent = useClaudeForAgent && !!process.env.ANTHROPIC_API_KEY;
+  
+  if (this.useClaudeForAgent) {
+    try {
+      this.analysisModel = anthropic("claude-sonnet-4-20250514");
+    } catch (error) {
+      console.warn("Failed to initialize Claude, falling back to GPT-4.1");
+      this.analysisModel = openai("gpt-4.1");
+      this.useClaudeForAgent = false;
+    }
+  } else {
+    this.analysisModel = openai("gpt-4.1");
+  }
+
+  this.picaClient = new Pica(picaSecretKey, {
+    connectors: ["*"],
+    serverUrl: "https://development-api.picaos.com",
+  });
+
+  this.memory = new Memory({
+    storage: new LibSQLStore({
+      url: 'file::memory:',
+    }),
+  });
+
+  this.initializeAgent(openAIApiKey);
+}
 
   private async initializeAgent(openAIApiKey: string) {
     const systemPrompt = await this.picaClient.generateSystemPrompt();
@@ -124,27 +133,48 @@ You must adapt to any platform (Google, Microsoft, Slack, etc.) and any model (e
   }
 
   async generateTaskPrompt(
-    action: Readonly<ModelDefinition>,
-    context: ExecutionContext,
-    history: Readonly<any[]>
-  ): Promise<string> {
-    
-    const humanLikePrompt = this.buildHumanLikePrompt(action, context, history);
-    
-    const verificationSteps = this.getVerificationSteps(action, context);
-    
-    let finalPrompt = humanLikePrompt;
+  action: Readonly<ModelDefinition>,
+  context: ExecutionContext,
+  history: Readonly<any[]>
+): Promise<string> {
+  
+  const humanLikePrompt = this.buildHumanLikePrompt(action, context, history);
+  
+  const verificationSteps = this.getVerificationSteps(action, context);
+  
+  let finalPrompt = humanLikePrompt;
 
-    if (verificationSteps) {
-      finalPrompt += `\n\n${verificationSteps}`;
+  if (context.availableIds && context.availableIds.size > 0) {
+    finalPrompt += "\n\n### 📋 Session Context (from previous actions):";
+    for (const [idType, values] of context.availableIds.entries()) {
+      const idValues = Array.isArray(values) ? values : [values];
+      if (idValues.length > 0) {
+        finalPrompt += `\n- ${idType}: "${idValues[0]}" (already created/available)`;
+      }
     }
-
-    finalPrompt += `\n\n---\n### Knowledge\n${action.knowledge}`;
     
-    finalPrompt += `\n\n### Final Instruction\nUse Action ID: ${action._id} to execute the task based on the Knowledge provided above.`;
-
-    return finalPrompt;
+    const recentSuccesses = context.recentActions.filter(a => a.success).slice(-3);
+    if (recentSuccesses.length > 0) {
+      finalPrompt += "\n\n### Recent successful actions in this session:";
+      recentSuccesses.forEach(action => {
+        finalPrompt += `\n- ✓ ${action.actionTitle}`;
+        if (action.output && typeof action.output === 'string' && action.output.includes('"id"')) {
+          finalPrompt += " (created resource with ID)";
+        }
+      });
+    }
   }
+
+  if (verificationSteps) {
+    finalPrompt += `\n\n${verificationSteps}`;
+  }
+
+  finalPrompt += `\n\n---\n### Knowledge\n${action.knowledge}`;
+  
+  finalPrompt += `\n\n### Final Instruction\nUse Action ID: ${action._id} to execute the task based on the Knowledge provided above.`;
+
+  return finalPrompt;
+}
 
   private buildHumanLikePrompt(
     action: Readonly<ModelDefinition>,
@@ -311,88 +341,139 @@ ${outputText || "No text output."}
   }
 
   private async extractDataWithLLM(outputText: string, toolExecutionResults: any[]): Promise<ExtractedData> {
-    const systemPrompt = `You are a highly precise data extraction engine. Your sole purpose is to extract structured data from an AI agent's output. The 'Tool Execution Results' will likely be empty; you MUST focus on the 'Agent's Final Text Output'.
+  const systemPrompt = `You are a highly precise data extraction engine. Your sole purpose is to extract structured data from an AI agent's output.
 
-    ### Rules of Extraction:
-    1.  **Search the Text:** You MUST meticulously search the agent's text output for resource IDs. The ID might be in a sentence or inside a JSON code block.
-    2.  **Extract All IDs:** Find any key that looks like an ID (e.g., "id", "_id", "documentId", "revisionId", "spreadsheetId", "sheetId", "messageId"). Create a descriptive key for it in the 'ids' object.
-    3.  **Look for JSON blocks:** Often the output contains JSON in code blocks with the created resource data.
-    4.  **Be Precise:** Do not guess or hallucinate data. If no ID is mentioned, return an empty object.
+EXTRACTION RULES:
+1. **Search aggressively**: Look for ANY mention of IDs in the text, including:
+   - Sentences like "created with ID: xyz123" or "document ID is abc456"
+   - JSON blocks with id fields
+   - URLs containing IDs (e.g., /documents/123abc)
+   - Any alphanumeric string that looks like an ID after words like: id, ID, documentId, spreadsheetId, fileId, etc.
 
-    **Example 1:**
-    - Agent Text: "The new document ID is 1a2b3c-4d5e."
-    - Your Output MUST be: \`{"ids": {"documentId": "1a2b3c-4d5e"}}\`
-    
-    **Example 2:**
-    - Agent Text: "Success! Here is the JSON: \`\`\`json\n{"documentId": "xyz-789", "revisionId": "rev-123"}\`\`\`"
-    - Your Output MUST be: \`{"ids": {"documentId": "xyz-789", "revisionId": "rev-123"}}\`
+2. **Common ID patterns to find**:
+   - After "ID:", "id:", "ID is", "with ID"
+   - Inside quotes after ID-related words
+   - Long alphanumeric strings (10+ characters)
+   - Strings matching patterns like: 1a2b3c4d5e6f or 123456789012
 
-    You MUST return ONLY the raw JSON object that conforms to the schema.`;
+3. **Extract ALL variations**: If you see "documentId", "document ID", "doc ID" - they all go under "documentId"
 
-    const userPrompt = `Extract structured data from the following execution logs:
+4. **Be aggressive but accurate**: If it looks like an ID and is mentioned in context of creation/retrieval, extract it.
 
-### Agent's Final Text Output:
-\`\`\`
-${outputText || "No output."}
-\`\`\`
-`;
-    try {
-      const { object: extractedData } = await generateObject({
-        model: this.analysisModel,
-        schema: ExtractedDataSchema,
-        prompt: userPrompt,
-        system: systemPrompt,
-      });
+IMPORTANT: The agent often says things like "I created a document with ID: XYZ123" - you MUST extract "XYZ123" as the documentId.`;
 
-      console.log('✅ Extracted Data:', JSON.stringify(extractedData, null, 2));
-      return extractedData;
+  const userPrompt = `Extract ALL IDs and resources from this output:
 
-    } catch (error) {
-      console.error('Error during LLM-based data extraction:', error);
-      return { ids: {}, created_resources: {}, extracted_lists: {} };
-    }
-  }
+${outputText}
 
-  async executeTask(
-    taskPrompt: string,
-    threadId?: string
-  ): Promise<{ success: boolean; output?: any; error?: string; extractedData?: any; analysisReason?: string }> {
-    try {
-      const result = await this.agent.generate(taskPrompt, {
-        threadId: threadId || `test-${Date.now()}`,
-        resourceId: `resource-${Date.now()}`
-      });
+Look for phrases like:
+- "created ... with ID"
+- "document ID is"
+- "ID:"
+- JSON blocks
+- Any ID-like strings after creation/retrieval mentions`;
 
-      const outputText = result.text || "";
-      const toolResults = result.toolResults || [];
+  try {
+    const { object: extractedData } = await generateObject({
+      model: this.analysisModel,
+      schema: ExtractedDataSchema,
+      prompt: userPrompt,
+      system: systemPrompt,
+    });
 
-      const extractedData = await this.extractDataWithLLM(outputText, toolResults);
-      const analysis = await this.analyzeExecutionResultWithLLM(outputText, toolResults);
-
-      if (!analysis.success) {
-        return {
-          success: false,
-          error: analysis.reason,
-          output: outputText,
-          extractedData,
-          analysisReason: analysis.reason 
-        };
+    if ((!extractedData.ids || Object.keys(extractedData.ids).length === 0) && outputText) {
+      const manualIds: Record<string, string> = {};
+      
+      const patterns = [
+        /(?:document\s*)?ID(?:\s*is)?:\s*["']?([a-zA-Z0-9_-]{10,})["']?/gi,
+        /created.*?(?:with\s+)?ID:\s*["']?([a-zA-Z0-9_-]{10,})["']?/gi,
+        /"(?:id|documentId|spreadsheetId|fileId|messageId)"\s*:\s*"([^"]+)"/gi,
+        /(?:documentId|spreadsheetId|fileId)(?:\s+is)?\s*["']?([a-zA-Z0-9_-]{10,})["']?/gi
+      ];
+      
+      for (const pattern of patterns) {
+        let match;
+        while ((match = pattern.exec(outputText)) !== null) {
+          const id = match[1];
+          if (id && id.length >= 10) {
+            const lowerText = outputText.toLowerCase();
+            if (lowerText.includes('document')) {
+              manualIds.documentId = id;
+            } else if (lowerText.includes('spreadsheet')) {
+              manualIds.spreadsheetId = id;
+            } else if (lowerText.includes('file')) {
+              manualIds.fileId = id;
+            } else {
+              manualIds.id = id;
+            }
+          }
+        }
       }
       
+      if (Object.keys(manualIds).length > 0) {
+        console.log('📍 Manual ID extraction found:', manualIds);
+        extractedData.ids = { ...extractedData.ids, ...manualIds };
+      }
+    }
+
+    console.log('✅ Extracted Data:', JSON.stringify(extractedData, null, 2));
+    return extractedData;
+
+  } catch (error) {
+    console.error('Error during LLM-based data extraction:', error);
+    return { ids: {}, created_resources: {}, extracted_lists: {} };
+  }
+}
+
+  async executeTask(
+  taskPrompt: string,
+  threadId?: string
+): Promise<{ success: boolean; output?: any; error?: string; extractedData?: any; analysisReason?: string }> {
+  try {
+    // const knowledgeSeparator = '\n\n---\n';
+    // const promptForDisplay = taskPrompt.split(knowledgeSeparator)[0];
+
+    console.log(chalk.gray('\n📝 Prompt being sent to Agent (Knowledge hidden for brevity):'));
+    console.log(chalk.gray('─'.repeat(80)));
+    console.log(chalk.gray(taskPrompt));
+    console.log(chalk.gray('\n[... Technical knowledge block hidden ...]'));
+    console.log(chalk.gray('─'.repeat(80) + '\n'));
+    
+    const result = await this.agent.generate(taskPrompt, {
+      threadId: threadId || `test-${Date.now()}`,
+      resourceId: `resource-${Date.now()}`
+    });
+
+    const outputText = result.text || "";
+    const toolResults = result.toolResults || [];
+
+    const extractedData = await this.extractDataWithLLM(outputText, toolResults);
+    const analysis = await this.analyzeExecutionResultWithLLM(outputText, toolResults);
+
+    if (!analysis.success) {
       return {
-        success: true,
+        success: false,
+        error: analysis.reason,
         output: outputText,
         extractedData,
         analysisReason: analysis.reason 
       };
-
-    } catch (error: any) {
-      console.error('Error in EnhancedAgentService.executeTask:', error);
-      return {
-        success: false,
-        error: error.message || "Unknown error during task execution",
-        analysisReason: "Task execution failed with an exception." 
-      };
     }
+    
+    return {
+      success: true,
+      output: outputText,
+      extractedData,
+      analysisReason: analysis.reason 
+    };
+
+  } catch (error: any) {
+    console.error('Error in EnhancedAgentService.executeTask:', error);
+    return {
+      success: false,
+      error: error.message || "Unknown error during task execution",
+      analysisReason: "Task execution failed with an exception." 
+    };
   }
+}
 }
