@@ -37,7 +37,6 @@ export class ContextManager {
 
       if (extractedData.ids) {
         for (const [key, id] of Object.entries(extractedData.ids)) {
-          // Ensure id is a string before pushing
           if (typeof id === 'string') {
             if (!this.globalContext.availableIds.has(key)) {
               this.globalContext.availableIds.set(key, []);
@@ -99,13 +98,14 @@ export class ContextManager {
   }
 
   getContext(): ExecutionContext {
-    return JSON.parse(JSON.stringify({
-      ...this.globalContext,
-      createdResources: Object.fromEntries(this.globalContext.createdResources),
-      availableIds: Object.fromEntries(this.globalContext.availableIds)
-    }));
+    const newContext: ExecutionContext = {
+      platformSummary: this.globalContext.platformSummary,
+      recentActions: [...this.globalContext.recentActions],
+      createdResources: new Map(this.globalContext.createdResources),
+      availableIds: new Map(this.globalContext.availableIds)
+    };
+    return newContext;
   }
-
   getContextForFailedActions(): ExecutionContext {
      const context = this.getContext();
      context.platformSummary = `${context.platformSummary}\n\nRetrying failed actions with full context from successful actions.`;

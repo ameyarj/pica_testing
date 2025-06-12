@@ -71,89 +71,173 @@ export class PicaosTestingOrchestrator {
     }
   }
 
-  private getActionPriority(actionName: string): number {
-    const name = actionName.toLowerCase();
-    if (name.includes('create') || name.includes('post')) return 1;
-    if (name.includes('list') || name.includes('getmany')) return 2;
-    if (name.includes('get') || name.includes('getone')) return 3;
-    if (name.includes('update') || name.includes('patch')) return 4;
-    if (name.includes('delete') || name.includes('remove')) return 5;
-    return 6;
+  private async analyzeDependenciesAndSort(
+  connection: ConnectionDefinition,
+  modelDefinitions: ModelDefinition[]
+): Promise<ModelDefinition[]> {
+  console.log("🤖 Analyzing action dependencies with AI...");
+
+  const analysisPrompt = `Platform: ${connection.name} (${connection.platform})
+
+  Analyze these actions and return them in optimal execution order. Consider:
+  1. Create actions should come first
+  2. List/Get actions should come after create
+  3. Update actions need existing resources
+  4. Delete actions should be last
+
+  Actions to sort:
+  ${modelDefinitions.map(action => `"${action._id}": ${action.title} (${action.actionName})`).join('\n')}
+
+  Return ONLY a JSON array of action IDs in execution order.`;
+
+  const sortedIds = await this.knowledgeRefiner.getExecutionOrder(analysisPrompt);
+
+  if (!sortedIds || sortedIds.length !== modelDefinitions.length) {
+    console.log(chalk.yellow("⚠️ AI analysis incomplete. Using enhanced priority sorting..."));
+    return this.getEnhancedPrioritySort(modelDefinitions);
   }
+
+  const sortedActions = this.mapIdsToActions(sortedIds, modelDefinitions);
+  if (sortedActions.some(action => action === undefined)) {
+    console.log(chalk.yellow("⚠️ Mapping error. Using enhanced priority sorting..."));
+    return this.getEnhancedPrioritySort(modelDefinitions);
+  }
+
+  console.log(chalk.green("✅ AI-generated execution order applied successfully."));
+  this.displayExecutionOrder(sortedActions);
+  return sortedActions;
+}
+
+private getEnhancedPrioritySort(actions: ModelDefinition[]): ModelDefinition[] {
+  return [...actions].sort((a, b) => {
+    const priorityA = this.getEnhancedActionPriority(a);
+    const priorityB = this.getEnhancedActionPriority(b);
+    
+    if (priorityA !== priorityB) {
+      return priorityA - priorityB;
+    }
+    
+    const modelPriorityA = this.getModelPriority(a.modelName);
+    const modelPriorityB = this.getModelPriority(b.modelName);
+    
+    return modelPriorityA - modelPriorityB;
+  });
+}
+
+private getEnhancedActionPriority(action: ModelDefinition): number {
+  const name = action.actionName.toLowerCase();
+  const path = action.path.toLowerCase();
+  
+  if (name.includes('create') || name.includes('add') || (path.includes('post') && !path.includes('get'))) return 1;
+  
+  if (name.includes('list') || name.includes('getmany') || name.includes('search')) return 2;
+  
+  if (name.includes('get') || name.includes('retrieve') || name.includes('fetch')) return 3;
+  
+  if (name.includes('update') || name.includes('patch') || name.includes('modify') || name.includes('edit')) return 4;
+  
+  if (name.includes('delete') || name.includes('remove') || name.includes('clear')) return 5;
+  
+  return 6; 
+}
+
+private getModelPriority(modelName: string): number {
+  const model = modelName.toLowerCase();
+  
+  if (model.includes('spreadsheet') || model.includes('document') || model.includes('folder')) return 1;
+  
+  if (model.includes('sheet') || model.includes('page') || model.includes('table')) return 2;
+  
+  if (model.includes('value') || model.includes('content') || model.includes('data')) return 3;
+  
+  return 4;
+}
+
+private mapIdsToActions(sortedIds: string[], actions: ModelDefinition[]): ModelDefinition[] {
+  const actionsMap = new Map(actions.map(action => [action._id, action]));
+  return sortedIds.map(id => actionsMap.get(id)!);
+}
+
+private displayExecutionOrder(actions: ModelDefinition[]): void {
+  console.log(chalk.bold.cyan("\n📋 Determined Optimal Execution Order:"));
+  actions.forEach((action, index) => {
+    const priority = this.getEnhancedActionPriority(action);
+    const priorityLabel = priority === 1 ? "CREATE" : priority === 2 ? "LIST" : priority === 3 ? "GET" : priority === 4 ? "UPDATE" : "DELETE";
+    console.log(chalk.cyan(`   ${index + 1}. [${priorityLabel}] ${action.title} (${action.modelName})`));
+  });
+}
 
   private async testPlatform(connection: ConnectionDefinition): Promise<void> {
-    const modelDefinitions = await this.picaApiService.getModelDefinitions(connection._id);
-    if (!modelDefinitions || modelDefinitions.length === 0) {
-      console.log(`No model definitions found for ${connection.name}.`);
-      return;
-    }
-
-    console.log(`\nFound ${modelDefinitions.length} actions for ${connection.name}.`);
-    
-    this.contextManager.reset();
-
-    const sortedActions = [...modelDefinitions].sort((a, b) => 
-      this.getActionPriority(a.actionName) - this.getActionPriority(b.actionName)
-    );
-
-    const results: ActionResult[] = [];
-    const failedActionsLog: Array<{action: ModelDefinition, result: ActionResult}> = [];
-
-
-    console.log("\n=== FIRST PASS: Testing all actions in priority order ===");
-    for (const action of sortedActions) {
-      if (!action.knowledge || action.knowledge.trim() === "") {
-        console.log(`\n🟡 Skipping "${action.title}" - No knowledge provided.`);
-        results.push({
-          actionTitle: action.title,
-          modelName: action.modelName,
-          success: false,
-          error: "Skipped - No knowledge",
-          originalKnowledge: "",
-          attempts: 0
-        });
-        continue;
-      }
-
-      console.log(`\n--- Testing Action: "${action.title}" (${action.modelName}) ---`);
-      const result = await this.testActionWithRetries(action);
-      results.push(result);
-
-      this.contextManager.updateContext(action, result, result.extractedData);
-
-      if (!result.success) {
-        failedActionsLog.push({action, result});
-      }
-    }
-
-    if (failedActionsLog.length > 0) {
-      console.log(`\n=== SECOND PASS: Retrying ${failedActionsLog.length} failed actions with context ===`);
-      
-      for (const {action: failedAction, result: firstPassResult} of failedActionsLog) {
-        console.log(`\n--- Retrying Action: "${failedAction.title}" (${failedAction.modelName}) ---`);
-        const knowledgeForRetry = firstPassResult.finalKnowledge || failedAction.knowledge;
-        const contextualResult = await this.testActionWithContextualRetries(
-            { ...failedAction, knowledge: knowledgeForRetry }, 
-            firstPassResult
-        );
-        
-        const originalResultIndex = results.findIndex(r => 
-          r.actionTitle === failedAction.title && r.modelName === failedAction.modelName
-        );
-        if (originalResultIndex >= 0) {
-          results[originalResultIndex] = { 
-            ...contextualResult, 
-            attempts: firstPassResult.attempts + contextualResult.attempts, 
-            originalKnowledge: failedAction.knowledge, 
-            finalKnowledge: contextualResult.finalKnowledge, 
-            contextUsed: true 
-          };
-        }
-      }
-    }
-
-    this.summarizeResults(connection, results);
+  const modelDefinitions = await this.picaApiService.getModelDefinitions(connection._id);
+  if (!modelDefinitions || modelDefinitions.length === 0) {
+    console.log(`No model definitions found for ${connection.name}.`);
+    return;
   }
+
+  console.log(`\nFound ${modelDefinitions.length} actions for ${connection.name}.`);
+  
+  this.contextManager.reset();
+
+  const sortedActions = await this.analyzeDependenciesAndSort(connection, modelDefinitions);
+
+  const results: ActionResult[] = [];
+  const failedActionsLog: Array<{action: ModelDefinition, result: ActionResult}> = [];
+
+  console.log("\n=== FIRST PASS: Testing all actions in dependency order ===");
+  for (const action of sortedActions) {
+    if (!action.knowledge || action.knowledge.trim() === "") {
+      console.log(`\n🟡 Skipping "${action.title}" - No knowledge provided.`);
+      results.push({
+        actionTitle: action.title,
+        modelName: action.modelName,
+        success: false,
+        error: "Skipped - No knowledge",
+        originalKnowledge: "",
+        attempts: 0
+      });
+      continue;
+    }
+
+    console.log(`\n--- Testing Action: "${action.title}" (${action.modelName}) ---`);
+    const result = await this.testActionWithRetries(action, results);
+    results.push(result);
+
+    this.contextManager.updateContext(action, result, result.extractedData);
+
+    if (!result.success) {
+      failedActionsLog.push({action, result});
+    }
+  }
+
+  if (failedActionsLog.length > 0) {
+    console.log(`\n=== SECOND PASS: Retrying ${failedActionsLog.length} failed actions with context ===`);
+    
+    for (const {action: failedAction, result: firstPassResult} of failedActionsLog) {
+      console.log(`\n--- Retrying Action: "${failedAction.title}" (${failedAction.modelName}) ---`);
+      const knowledgeForRetry = firstPassResult.finalKnowledge || failedAction.knowledge;
+      const contextualResult = await this.testActionWithContextualRetries(
+          { ...failedAction, knowledge: knowledgeForRetry }, 
+          firstPassResult,
+          results 
+      );
+      
+      const originalResultIndex = results.findIndex(r => 
+        r.actionTitle === failedAction.title && r.modelName === failedAction.modelName
+      );
+      if (originalResultIndex >= 0) {
+        results[originalResultIndex] = { 
+          ...contextualResult, 
+          attempts: firstPassResult.attempts + contextualResult.attempts, 
+          originalKnowledge: failedAction.knowledge, 
+          finalKnowledge: contextualResult.finalKnowledge, 
+          contextUsed: true 
+        };
+      }
+    }
+  }
+
+  this.summarizeResults(connection, results);
+}
 
   private displayKnowledgeDiff(oldKnowledge: string, newKnowledge: string): void {
     const changes = diff.diffLines(oldKnowledge, newKnowledge);
@@ -180,91 +264,117 @@ export class PicaosTestingOrchestrator {
       console.log(chalk.gray("\t🤔 Knowledge refiner proposed no effective changes."));
     }
   }
-  private async testActionWithRetries(action: ModelDefinition): Promise<ActionResult> {
-    let currentKnowledge = action.knowledge;
-    let attempts = 0;
-    let lastError: string | undefined;
-    let lastOutput: any;
-    let extractedData: any;
-    let analysisReason: string | undefined;
+  private async testActionWithRetries(action: ModelDefinition, resultsHistory: Readonly<ActionResult[]>): Promise<ActionResult> {
+  let currentKnowledge = action.knowledge;
+  let promptStrategy: string | null = null;
+  let attempts = 0;
+  let lastError: string | undefined;
+  let lastPrompt: string | undefined;
+  let extractedData: any;
+  let analysisReason: string | undefined;
 
-    while (attempts < this.maxRetriesPerAction) {
-      attempts++;
-      console.log(chalk.blue(`\tAttempt ${attempts}/${this.maxRetriesPerAction}...`));
+  while (attempts < this.maxRetriesPerAction) {
+    attempts++;
+    console.log(chalk.blue(`\tAttempt ${attempts}/${this.maxRetriesPerAction}...`));
 
-      const context = this.contextManager.getContext();
-      const actionToExecute = { ...action, knowledge: currentKnowledge };
-      
-      const taskPrompt = await this.agentService.generateTaskPrompt(actionToExecute, context);
-      
-      const promptForDisplay = taskPrompt.split('Knowledge:')[0] + 'Knowledge: [Omitted for brevity]';
-      console.log(chalk.gray(`\t📋 Prompt Sent:\n\t${promptForDisplay.replace(/\n/g, "\n\t")}`));
-      
-      const agentResult = await this.agentService.executeTask(taskPrompt);
-      analysisReason = agentResult.analysisReason;
-      
-      if (agentResult.success) {
-        console.log(chalk.green.bold(`\t✅ SUCCESS:`), chalk.green(analysisReason || "Action completed successfully."));
-        return {
-          success: true,
-          output: agentResult.output,
-          originalKnowledge: action.knowledge,
-          finalKnowledge: currentKnowledge,   
-          attempts,
-          actionTitle: action.title,
-          modelName: action.modelName,
-          extractedData: agentResult.extractedData
-        };
-      }
-
-      lastError = agentResult.error || "Unknown error during agent execution";
-      console.log(chalk.red.bold(`\t❌ FAILED:`), chalk.red(analysisReason || "Action failed."));
-      if(agentResult.error) {
-        console.log(chalk.red(`\t   Error Details: ${agentResult.error}`));
-      }
-
-
-      if (attempts < this.maxRetriesPerAction) {
-        console.log(chalk.yellow("\t💡 Refining knowledge..."));
-        const refinedKnowledge = await this.knowledgeRefiner.refineKnowledge(
-          currentKnowledge, 
-          lastError,
-          action, 
-          context
-        );
-
-        if (refinedKnowledge && refinedKnowledge.trim().toUpperCase() !== "NO_CHANGE") {
-          this.displayKnowledgeDiff(currentKnowledge, refinedKnowledge);
-          currentKnowledge = refinedKnowledge.trim();
-        } else {
-          console.log(chalk.gray("\t🤷 Knowledge refiner did not suggest an update. Retrying with same knowledge."));
-        }
-      }
+    const context = this.contextManager.getContext();
+    const actionToExecute = { ...action, knowledge: currentKnowledge };
+    
+    let taskPrompt = await this.agentService.generateTaskPrompt(actionToExecute, context, resultsHistory);
+    
+    if (promptStrategy) {
+      taskPrompt = this.applyPromptStrategy(taskPrompt, promptStrategy);
+    }
+    
+    lastPrompt = taskPrompt;
+    
+    const promptForDisplay = taskPrompt.split('Technical Details:')[0] + '[Technical details omitted for brevity]';
+    console.log(chalk.gray(`\t📋 Prompt Sent:\n\t${promptForDisplay.replace(/\n/g, "\n\t")}`));
+    
+    const agentResult = await this.agentService.executeTask(taskPrompt);
+    analysisReason = agentResult.analysisReason;
+    
+    if (agentResult.success) {
+      console.log(chalk.green.bold(`\t✅ SUCCESS:`), chalk.green(analysisReason || "Action completed successfully."));
+      return {
+        success: true,
+        output: agentResult.output,
+        originalKnowledge: action.knowledge,
+        finalKnowledge: currentKnowledge,   
+        attempts,
+        actionTitle: action.title,
+        modelName: action.modelName,
+        extractedData: agentResult.extractedData
+      };
     }
 
-    console.log(chalk.red.bold(`\t🔥 FINAL FAILURE for "${action.title}" after ${attempts} attempts.`));
-    return {
-      success: false,
-      error: lastError,
-      output: lastOutput,
-      originalKnowledge: action.knowledge,
-      finalKnowledge: currentKnowledge, 
-      attempts,
-      actionTitle: action.title,
-      modelName: action.modelName,
-      extractedData
-    };
+    lastError = agentResult.error || "Unknown error during agent execution";
+    console.log(chalk.red.bold(`\t❌ FAILED:`), chalk.red(analysisReason || "Action failed."));
+    if(agentResult.error) {
+      console.log(chalk.red(`\t   Error Details: ${agentResult.error}`));
+    }
+
+    if (attempts < this.maxRetriesPerAction) {
+      console.log(chalk.yellow("\t💡 Refining approach..."));
+      const refinement = await this.knowledgeRefiner.refineKnowledge(
+        currentKnowledge, 
+        lastError,
+        action, 
+        context,
+        lastPrompt
+      );
+
+      if (refinement.knowledge && refinement.knowledge.trim().toUpperCase() !== "NO_CHANGE") {
+        this.displayKnowledgeDiff(currentKnowledge, refinement.knowledge);
+        currentKnowledge = refinement.knowledge.trim();
+      }
+
+      if (refinement.promptStrategy) {
+        console.log(chalk.blue("\t🎯 Applying new prompt strategy..."));
+        promptStrategy = refinement.promptStrategy;
+      }
+
+      if (!refinement.knowledge && !refinement.promptStrategy) {
+        console.log(chalk.gray("\t🤷 No refinements suggested. Retrying with same approach."));
+      }
+    }
   }
+
+  console.log(chalk.red.bold(`\t🔥 FINAL FAILURE for "${action.title}" after ${attempts} attempts.`));
+  return {
+    success: false,
+    error: lastError,
+    originalKnowledge: action.knowledge,
+    finalKnowledge: currentKnowledge, 
+    attempts,
+    actionTitle: action.title,
+    modelName: action.modelName,
+    extractedData
+  };
+}
+
+private applyPromptStrategy(originalPrompt: string, strategy: string): string {
+  if (strategy.toLowerCase().includes('more conversational')) {
+    return `Please help me with this task in a friendly, conversational way: ${originalPrompt}`;
+  } else if (strategy.toLowerCase().includes('step by step')) {
+    return `Let's break this down step by step: ${originalPrompt}`;
+  } else if (strategy.toLowerCase().includes('context')) {
+    return `${strategy}\n\n${originalPrompt}`;
+  }
+  
+  return `${strategy}\n\n${originalPrompt}`;
+}
 
   private async testActionWithContextualRetries(
     action: ModelDefinition, 
-    firstPassResult: ActionResult 
+    firstPassResult: ActionResult,
+    resultsHistory: Readonly<ActionResult[]>
   ): Promise<ActionResult> {
     console.log(chalk.cyan.bold(`\t🔄 Retrying with full context...`));
     
     const contextualContext = this.contextManager.getContextForFailedActions();
     
-    const taskPrompt = await this.agentService.generateTaskPrompt(action, contextualContext);
+    const taskPrompt = await this.agentService.generateTaskPrompt(action, contextualContext, resultsHistory);
     
     const promptForDisplay = taskPrompt.split('Knowledge:')[0] + 'Knowledge: [Omitted for brevity]';
     console.log(chalk.gray(`\t📋 Prompt Sent:\n\t${promptForDisplay.replace(/\n/g, "\n\t")}`));

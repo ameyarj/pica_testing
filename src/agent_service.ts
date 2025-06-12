@@ -60,121 +60,183 @@ export class EnhancedAgentService {
       name: "PicaTestingAgent",
       instructions: `${systemPrompt}
 
-You are an automated execution engine. Your SOLE PURPOSE is to call the provided Pica tool.
-- You MUST call the tool to accomplish the task. Do NOT simulate or describe the action. EXECUTE IT.
-- Use the context, especially the 'Available Data' JSON object, to find necessary IDs or data for the tool's arguments.
-- CRITICAL: If you need an ID (like documentId) and it's available in the context, USE IT IMMEDIATELY. Do not ask the user for IDs that are already available.
+You are an intelligent API testing agent that executes actions across diverse platforms and models. Your core mission is to successfully execute the provided Pica tool action.
 
-**Verification Principle: For any action that modifies, updates, or deletes data (e.g., 'update document', 'delete user'), you MUST first verify the target data exists. If it does not, you must take a preliminary step to CREATE it before proceeding with the original action. This may require you to perform multiple tool calls.**
+EXECUTION PRINCIPLES:
+- ALWAYS call the Pica tool to execute the action - never simulate or describe
+- Use available context data (IDs, resources) from previous actions automatically
+- If an ID is needed and available in context, use it immediately without asking
+- For create actions: generate realistic, human-like data appropriate to the platform
+- For update/delete actions: verify the target resource exists first, create mock data if needed
 
-**CRITICAL RULE: After the tool call, your final response to the user MUST include the raw JSON output from the Pica tool. This is not optional. If the tool creates a new resource, you MUST include the entire JSON object of that resource, including its ID (e.g., "documentId"). Wrap the JSON in markdown code blocks.**
-`,
+CONTEXT UTILIZATION:
+- The "Available Data" JSON contains IDs and resources from previous successful actions
+- Map these contextual values to required parameters intelligently
+- Example: if action needs 'documentId' and context has documentId: "abc123", use "abc123"
+
+VERIFICATION PROTOCOL:
+- Before modifying/deleting: verify the target exists via a get/list operation
+- If target doesn't exist: create appropriate mock data first
+- Then proceed with the original action
+
+RESPONSE REQUIREMENTS:
+- Always include the complete raw JSON output from the Pica tool in markdown code blocks
+- If the tool creates a resource, ensure the full JSON (including IDs) is displayed
+- Provide clear success/failure indication with specific details
+
+You must adapt to any platform (Google, Microsoft, Slack, etc.) and any model (emails, documents, files, etc.) generically.`,
       model: openai("gpt-4.1"),
       tools: { ...this.picaClient.oneTool },
       memory: this.memory,
     });
   }
 
-  private buildContextualPrompt(action: ModelDefinition, context: ExecutionContext): string {
-    let contextPrompt = "";
-    
-    const availableData: { [key: string]: any } = {};
-
-    if (context.availableIds && context.availableIds.size > 0) {
-      availableData.ids = Object.fromEntries(context.availableIds);
-    }
-
-    if (context.createdResources && context.createdResources.size > 0) {
-        availableData.resources = Object.fromEntries(context.createdResources);
-    }
-
-    if (Object.keys(availableData).length > 0) {
-      contextPrompt += `--- AVAILABLE DATA FOR TOOL ARGUMENTS ---\n`;
-      contextPrompt += `\`\`\`json\n${JSON.stringify(availableData, null, 2)}\n\`\`\`\n`;
-      contextPrompt += `-----------------------------------------\n\n`;
-      
-      contextPrompt += `**IMPORTANT**: The above JSON contains IDs and data from previous successful actions. `;
-      contextPrompt += `If this action requires any of these IDs (like documentId, revisionId, etc.), `;
-      contextPrompt += `you MUST use them from the JSON above. Do NOT ask the user for IDs that are already available.\n\n`;
-    }
-
-    return contextPrompt;
+  private getVerificationSteps(
+  action: Readonly<ModelDefinition>,
+  context: ExecutionContext
+): string | null {
+  const actionName = action.actionName.toLowerCase();
+  const needsId = action.path.includes('{{') && (!context.availableIds || context.availableIds.size === 0);
+  
+  if (needsId && (actionName.includes('get') || actionName.includes('update') || actionName.includes('delete'))) {
+    return `Important: If you need an ID for this action but don't have one, please first create or list resources to get a valid ID, then proceed with the main task.`;
   }
-
-  private getVerificationInstructions(action: Readonly<ModelDefinition>): string {
-    const actionName = action.actionName.toLowerCase();
-    const modificationKeywords = ['update', 'patch', 'modify', 'replace', 'change'];
-    const deletionKeywords = ['delete', 'remove', 'revoke'];
-
-    let instructions = '';
-
-    if (modificationKeywords.some(kw => actionName.includes(kw))) {
-      instructions = `
-**VERIFICATION STEP REQUIRED:**
-This is an UPDATE action. Before executing it, you must first verify that the data you are trying to update actually exists.
-1.  **Check Data:** Use a "get" or "list" action to check the resource's current state. For example, to update text in a document, first get the document's content to ensure the text you want to replace is present.
-2.  **Create if Missing:** If the data is not present (e.g., the document is empty or the text is missing), you MUST first use a "create" or "insert" action to add mock data.
-3.  **Execute Update:** Only after confirming or creating the data, proceed with the original "${action.title}" action.
-`;
-    } else if (deletionKeywords.some(kw => actionName.includes(kw))) {
-      instructions = `
-**VERIFICATION STEP REQUIRED:**
-This is a DELETE action. Before executing it, you must first verify that the resource you are trying to delete actually exists.
-1.  **Check Existence:** Use a "get" or "list" action to confirm the resource exists using its ID.
-2.  **Create if Missing:** If the resource does not exist (perhaps it was deleted in a previous step), you MUST first use a "create" action to create a new resource. Use the ID of this newly created resource for the deletion.
-3.  **Execute Deletion:** Only after confirming or creating the resource, proceed with the original "${action.title}" action.
-`;
-    }
-    
-    return instructions;
-  }
-
+  
+  return null;
+}
   async generateTaskPrompt(
     action: Readonly<ModelDefinition>,
-    context: ExecutionContext
+    context: ExecutionContext,
+    history: Readonly<any[]>
   ): Promise<string> {
-    const contextualInfo = this.buildContextualPrompt(action, context);
-    const verificationInstructions = this.getVerificationInstructions(action);
-
-    let taskInstruction = `Perform the PicaOS action: "${action.title}".`;
-
-    if (verificationInstructions) {
-        taskInstruction += `\n\n${verificationInstructions}`;
-    }
-
-    if (contextualInfo.trim() !== "") {
-        taskInstruction += `\n\nYou MUST use the data from the "AVAILABLE DATA" JSON object to populate the required parameters for the tool call. For example, if the action requires a 'documentId', find it inside the 'ids' object in the JSON and use it directly.`;
-        
-        if (context.availableIds && context.availableIds.size > 0) {
-          taskInstruction += `\n\n**PARAMETER MAPPING**: `;
-          for (const [key, values] of context.availableIds.entries()) {
-            if (Array.isArray(values) && values.length > 0) {
-              taskInstruction += `For ${key}, use: "${values[0]}". `;
-            }
-          }
-        }
-    }
-
-    if (action.actionName.toLowerCase().includes('create')) {
-        taskInstruction += `\n\nWhen you call the tool, provide a realistic 'title' for the document.`
-    }
     
-    const prompt = `${taskInstruction}
+    const humanLikePrompt = this.buildHumanLikePrompt(action, context, history);
+    
+    const verificationSteps = this.getVerificationSteps(action, context);
+    
+    let finalPrompt = humanLikePrompt;
 
-${contextualInfo}
+    if (verificationSteps) {
+      finalPrompt += `\n\n${verificationSteps}`;
+    }
 
-Action Details:
-- Model: ${action.modelName}
-- Platform: ${action.connectionPlatform}
-- API Path: ${action.path || 'N/A'}
+    finalPrompt += `\n\n---\n### Knowledge\n${action.knowledge}`;
+    
+    finalPrompt += `\n\n### Final Instruction\nUse Action ID: ${action._id} to execute the task based on the Knowledge provided above.`;
 
-You MUST call the Pica tool using this specific Action ID: **${action._id}**
-
-Knowledge:
-${action.knowledge}
-`;
-    return prompt;
+    return finalPrompt;
   }
+
+private buildHumanLikePrompt(
+  action: Readonly<ModelDefinition>,
+  context: ExecutionContext,
+  history: Readonly<any[]>
+): string {
+  
+  let prompt = this.getConversationalOpener(action, context, history);
+  
+  if (context.availableIds && context.availableIds.size > 0) {
+    prompt += this.buildContextualInstructions(action, context);
+  } else {
+    prompt += this.buildStandaloneInstructions(action);
+  }
+  
+  prompt += this.getRealisticDataSuggestions(action);
+  
+  return prompt;
+}
+
+private getConversationalOpener(
+  action: Readonly<ModelDefinition>,
+  context: ExecutionContext,
+  history: Readonly<any[]>
+): string {
+  const actionName = action.actionName.toLowerCase();
+  const platform = action.connectionPlatform.replace('-', ' ');
+  
+  if (history.length > 0 && context.availableIds && context.availableIds.size > 0) {
+    if (actionName.includes('create')) {
+      return `Great! Now I need you to create a new ${action.modelName.toLowerCase()} in ${platform}. `;
+    } else if (actionName.includes('get') || actionName.includes('retrieve')) {
+      return `Perfect! Now let's retrieve the ${action.modelName.toLowerCase()} we just worked with. `;
+    } else if (actionName.includes('update')) {
+      return `Excellent! Now I'd like you to update the ${action.modelName.toLowerCase()} with some new information. `;
+    } else if (actionName.includes('delete')) {
+      return `Now let's clean up by deleting the ${action.modelName.toLowerCase()} we created. `;
+    }
+  }
+  
+  if (actionName.includes('create')) {
+    return `Hi! I need you to create a new ${action.modelName.toLowerCase()} in ${platform}. `;
+  } else if (actionName.includes('list')) {
+    return `Hello! Can you show me all the ${action.modelName.toLowerCase()} available in ${platform}? `;
+  } else {
+    return `Hi! I need help with ${action.title.toLowerCase()} in ${platform}. `;
+  }
+}
+
+private buildContextualInstructions(
+  action: Readonly<ModelDefinition>,
+  context: ExecutionContext
+): string {
+  let instructions = "";
+  
+  for (const [idType, values] of context.availableIds.entries()) {
+    const idValues = Array.isArray(values) ? values : [values];
+    if (idValues.length > 0 && action.path.includes(`{{${idType}}}`)) {
+      instructions += `Use the ${idType} "${idValues[0]}" that we just worked with. `;
+    }
+  }
+  
+  const actionName = action.actionName.toLowerCase();
+  if (actionName.includes('update') || actionName.includes('patch')) {
+    instructions += `Please make a meaningful change - maybe add today's date or update some content to show the action worked. `;
+  } else if (actionName.includes('get') || actionName.includes('retrieve')) {
+    instructions += `Just fetch the current data so we can see what's there. `;
+  }
+  
+  return instructions;
+}
+
+private buildStandaloneInstructions(action: Readonly<ModelDefinition>): string {
+  const actionName = action.actionName.toLowerCase();
+  
+  if (actionName.includes('create')) {
+    return `Please create it with some realistic sample data. Make it look professional and give it a meaningful name. `;
+  } else if (actionName.includes('list')) {
+    return `Just show me what's currently available. `;
+  } else if (actionName.includes('get')) {
+    return `If you need specific IDs, try to find or create a resource first, then retrieve it. `;
+  }
+  
+  return `Please handle this request in the most logical way possible. `;
+}
+
+private getRealisticDataSuggestions(action: Readonly<ModelDefinition>): string {
+  const actionName = action.actionName.toLowerCase();
+  const model = action.modelName.toLowerCase();
+  const platform = action.connectionPlatform.toLowerCase();
+  
+  if (!actionName.includes('create') && !actionName.includes('update')) {
+    return "";
+  }
+  
+  let suggestions = "Here are some realistic examples you could use: ";
+  
+  if (platform.includes('sheet') || platform.includes('excel')) {
+    if (model.includes('spreadsheet')) {
+      suggestions += `Title: "Monthly Sales Report - ${new Date().toLocaleDateString()}", `;
+    } else if (model.includes('values')) {
+      suggestions += `Data: Headers like "Name, Email, Department" with a few sample rows, `;
+    }
+  } else if (platform.includes('doc') || platform.includes('word')) {
+    suggestions += `Title: "Project Planning Document - ${new Date().getFullYear()}", Content: "Meeting notes from today's discussion...", `;
+  } else if (platform.includes('email') || platform.includes('gmail')) {
+    suggestions += `Subject: "Test Email - ${new Date().toDateString()}", Body: "This is a test message sent via API", `;
+  }
+  
+  return suggestions + "or something similar that makes sense for this context.";
+}
   
   private async analyzeExecutionResultWithLLM(
     outputText: string,
