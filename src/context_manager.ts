@@ -46,6 +46,8 @@ export class ContextManager {
           }
         }
       }
+      this.storePathParameters(action.path, extractedData);
+
 
       if (extractedData.extracted_lists) {
         for (const [key, list] of Object.entries(extractedData.extracted_lists)) {
@@ -57,6 +59,27 @@ export class ContextManager {
 
     this.updatePlatformSummary();
   }
+
+  storePathParameters(pathTemplate: string, extractedData: any): void {
+  if (!extractedData?.ids) return;
+  
+  const pathParams = pathTemplate.match(/\{\{(\w+)\}\}/g) || [];
+  
+  for (const param of pathParams) {
+    const paramName = param.replace(/[{}]/g, '');
+    
+    if (extractedData.ids[paramName]) {
+      if (!this.globalContext.availableIds.has(paramName)) {
+        this.globalContext.availableIds.set(paramName, []);
+      }
+      const existingIds = this.globalContext.availableIds.get(paramName)!;
+      if (!existingIds.includes(extractedData.ids[paramName])) {
+        existingIds.push(extractedData.ids[paramName]);
+        console.log(`[ContextManager] Storing path parameter: ${paramName} = ${extractedData.ids[paramName]}`);
+      }
+    }
+  }
+}
 
   private updatePlatformSummary(): void {
     const recentSuccesses = this.globalContext.recentActions

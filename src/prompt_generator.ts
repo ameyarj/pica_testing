@@ -2,6 +2,7 @@ import { ModelDefinition, ExecutionContext } from './interface';
 import { openai } from "@ai-sdk/openai";
 import { anthropic } from "@ai-sdk/anthropic";
 import { generateText, LanguageModel } from "ai";
+import { PathParameterResolver } from './path_resolver';
 
 export interface PromptStrategy {
   tone: 'conversational' | 'technical' | 'step-by-step' | 'contextual';
@@ -168,6 +169,11 @@ export class EnhancedPromptGenerator {
     });
   }
   
+  if (strategy.contextLevel !== 'minimal') {
+      prompt += this.buildPathSection(action, context);
+    }
+  
+
   if (strategy.examples && examples.length > 0) {
     prompt += '\n\nHere are some examples that worked well:\n';
     examples.forEach(example => {
@@ -312,6 +318,41 @@ private incorporateResponseRefinements(
         section += '\n';
       });
     }
+  }
+  
+  return section;
+}
+
+private buildPathSection(action: ModelDefinition, context: ExecutionContext): string {
+  const { resolvedPath, missingParams } = PathParameterResolver.resolvePath(
+    action.path, 
+    context, 
+    context.availableIds ? Object.fromEntries(context.availableIds) : undefined
+  );
+  
+  let section = '';
+  
+  if (missingParams.length > 0) {
+    section += `\n\n⚠️ CRITICAL: Missing required parameters for this action:\n`;
+    missingParams.forEach(param => {
+      section += `• ${param} - `;
+      // Check if we have a similar parameter in context
+      if (context.availableIds) {
+        const similarParams = Array.from(context.availableIds.keys())
+          .filter(key => key.toLowerCase().includes(param.toLowerCase()) || 
+                        param.toLowerCase().includes(key.toLowerCase()));
+        if (similarParams.length > 0) {
+          const value = context.availableIds.get(similarParams[0]);
+          section += `Use "${value}" from context\n`;
+        } else {
+          section += `Need to create or find this resource first\n`;
+        }
+      } else {
+        section += `Need to create or find this resource first\n`;
+      }
+    });
+  } else if (resolvedPath !== action.path) {
+    section += `\n\n✅ Using resolved path: ${resolvedPath}\n`;
   }
   
   return section;

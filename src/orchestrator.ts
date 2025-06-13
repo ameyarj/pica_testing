@@ -4,7 +4,8 @@ import { KnowledgeRefiner } from './knowledge_refiner';
 import { ContextManager } from './context_manager';
 import { EnhancedDependencyAnalyzer } from './dependency_analyzer';
 import { EnhancedPromptGenerator } from './prompt_generator';
-import { ConnectionDefinition, ModelDefinition, ActionResult } from './interface';
+import { ConnectionDefinition, ModelDefinition, ActionResult, ExecutionContext } from './interface';
+import { PathParameterResolver } from './path_resolver';
 import readline from 'readline/promises';
 import chalk from 'chalk';
 import * as diff from 'diff';
@@ -133,25 +134,44 @@ export class EnhancedPicaosTestingOrchestrator {
       }
 
       const dependenciesMet = this.checkDependencies(action._id, dependencyGraph, results);
-      
-      if (!dependenciesMet && !actionMetadata?.isOptional) {
-        console.log(chalk.yellow(`\n⚠️ Skipping "${action.title}" - Dependencies not met`));
-        failedActions.push({
-          action,
-          result: {
-            actionTitle: action.title,
-            modelName: action.modelName,
-            success: false,
-            error: "Dependencies not met",
-            originalKnowledge: action.knowledge,
-            attempts: 0,
-            passNumber: 1,
-            dependenciesMet: false
-          },
-          reason: "dependencies"
-        });
-        continue;
-      }
+const pathValidation = this.validateActionPath(action, this.contextManager.getContext());
+
+if (!dependenciesMet && !actionMetadata?.isOptional) {
+  console.log(chalk.yellow(`\n⚠️ Skipping "${action.title}" - Dependencies not met`));
+  failedActions.push({
+    action,
+    result: {
+      actionTitle: action.title,
+      modelName: action.modelName,
+      success: false,
+      error: "Dependencies not met",
+      originalKnowledge: action.knowledge,
+      attempts: 0,
+      passNumber: 1,
+      dependenciesMet: false
+    },
+    reason: "dependencies"
+  });
+  continue;
+}
+if (!pathValidation.canExecute) {
+  console.log(chalk.yellow(`\n⚠️ Skipping "${action.title}" - ${pathValidation.reason}`));
+  failedActions.push({
+    action,
+    result: {
+      actionTitle: action.title,
+      modelName: action.modelName,
+      success: false,
+      error: pathValidation.reason || "Path validation failed",
+      originalKnowledge: action.knowledge,
+      attempts: 0,
+      passNumber: 1,
+      dependenciesMet: true
+    },
+    reason: "path_validation"
+  });
+  continue;
+}
 
       console.log(chalk.bold.blue(`\n🎯 Testing: "${action.title}" (${action.modelName})`));
       if (actionMetadata) {
@@ -272,6 +292,25 @@ export class EnhancedPicaosTestingOrchestrator {
     
     return true;
   }
+
+  private validateActionPath(
+  action: ModelDefinition, 
+  context: ExecutionContext
+): { canExecute: boolean; reason?: string } {
+  const validation = PathParameterResolver.validateRequiredParameters(
+    action.path, 
+    context
+  );
+  
+  if (!validation.isValid) {
+    return {
+      canExecute: false,
+      reason: `Missing required parameters: ${validation.missingParams.join(', ')}`
+    };
+  }
+  
+  return { canExecute: true };
+}
 
   private async executeActionWithSmartRetries(
   action: ModelDefinition,

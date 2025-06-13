@@ -7,6 +7,7 @@ import { anthropic } from "@ai-sdk/anthropic";
 import { generateText, generateObject, LanguageModel } from "ai";
 import { z } from 'zod';
 import { ModelDefinition, ExecutionContext } from './interface';
+import { PathParameterResolver } from './path_resolver';
 import chalk from 'chalk';
 
 const ExtractedDataSchema = z.object({
@@ -138,8 +139,13 @@ You must adapt to any platform (Google, Microsoft, Slack, etc.) and any model (e
   history: Readonly<any[]>
 ): Promise<string> {
   
-  const humanLikePrompt = this.buildHumanLikePrompt(action, context, history);
+  const { resolvedPath, missingParams } = PathParameterResolver.resolvePath(
+    action.path, 
+    context, 
+    context.availableIds ? Object.fromEntries(context.availableIds) : undefined
+  );
   
+  const humanLikePrompt = this.buildHumanLikePrompt(action, context, history);
   const verificationSteps = this.getVerificationSteps(action, context);
   
   let finalPrompt = humanLikePrompt;
@@ -165,12 +171,23 @@ You must adapt to any platform (Google, Microsoft, Slack, etc.) and any model (e
     }
   }
 
+  if (missingParams.length > 0) {
+    finalPrompt += `\n\n⚠️ MISSING PATH PARAMETERS: ${missingParams.join(', ')}`;
+    finalPrompt += `\nYou may need to create or find these resources first.`;
+  } else if (resolvedPath !== action.path) {
+    finalPrompt += `\n\n✅ PATH RESOLVED: Using ${resolvedPath}`;
+  }
+
   if (verificationSteps) {
     finalPrompt += `\n\n${verificationSteps}`;
   }
 
-  finalPrompt += `\n\n---\n### Knowledge\n${action.knowledge}`;
-  
+  let updatedKnowledge = action.knowledge;
+  if (resolvedPath !== action.path) {
+    updatedKnowledge = updatedKnowledge.replace(action.path, resolvedPath);
+  }
+
+  finalPrompt += `\n\n---\n### Knowledge\n${updatedKnowledge}`;
   finalPrompt += `\n\n### Final Instruction\nUse Action ID: ${action._id} to execute the task based on the Knowledge provided above.`;
 
   return finalPrompt;
