@@ -33,6 +33,8 @@ export interface ActionResult {
   extractedData?: any;
   agentResponse?: string;
   analysisReason?: string;
+  isPermissionError?: boolean;
+
   
 }
 

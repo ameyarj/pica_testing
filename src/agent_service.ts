@@ -8,6 +8,8 @@ import { generateText, generateObject, LanguageModel } from "ai";
 import { z } from 'zod';
 import { ModelDefinition, ExecutionContext } from './interface';
 import { PathParameterResolver } from './path_resolver';
+import { URLValidator } from './url_validator';
+
 import chalk from 'chalk';
 
 const ExtractedDataSchema = z.object({
@@ -116,7 +118,7 @@ You must adapt to any platform (Google, Microsoft, Slack, etc.) and any model (e
       memory: this.memory,
     });
     
-    console.log(`Agent initialized with ${this.useClaudeForAgent ? 'Claude 3.5 Sonnet' : 'GPT-4.1'}`);
+    console.log(`Agent initialized with ${this.useClaudeForAgent ? 'claude-sonnet-4-20250514' : 'GPT-4.1'}`);
   }
 
   private getVerificationSteps(
@@ -149,6 +151,23 @@ You must adapt to any platform (Google, Microsoft, Slack, etc.) and any model (e
   const verificationSteps = this.getVerificationSteps(action, context);
   
   let finalPrompt = humanLikePrompt;
+
+  if (action.path && (action.path.includes('{{') || action.path.includes(':'))) {
+    const requiredParams = URLValidator.extractParametersFromPath(action.path);
+    
+    if (requiredParams.length > 0) {
+      finalPrompt += "\n\n⚠️ CRITICAL URL PARAMETERS NEEDED:\n";
+      requiredParams.forEach(param => {
+        if (context.availableIds?.has(param)) {
+          const value = context.availableIds.get(param)![0];
+          finalPrompt += `• ${param}: "${value}" ✓ (USE THIS VALUE)\n`;
+        } else {
+          finalPrompt += `• ${param}: ❌ MISSING - You need to create/find this first\n`;
+          finalPrompt += `  Hint: Look for a "Create ${param.replace(/Id$/, '')}" or "List" action\n`;
+        }
+      });
+    }
+  }
 
   if (context.availableIds && context.availableIds.size > 0) {
     finalPrompt += "\n\n### 📋 Session Context (from previous actions):";
@@ -307,17 +326,25 @@ You must adapt to any platform (Google, Microsoft, Slack, etc.) and any model (e
   private async analyzeExecutionResultWithLLM(
     outputText: string,
     toolResults: any[]
-  ): Promise<{ success: boolean; reason: string }> {
+  ): Promise<{ success: boolean; reason: string; isPermissionError?: boolean }> {
     const systemPrompt = `You are a Triage Analyst. Your job is to determine if an action succeeded or failed based ONLY on the agent's final text output.
 
 SUCCESS CRITERIA:
-- The agent's text explicitly states success AND provides evidence, like a resource ID or the requested data.
-- If JSON output is shown with resource IDs or successful response data, it's a success.
+- The agent's text explicitly states success AND provides evidence, like a resource ID or the requested data
+- If JSON output is shown with resource IDs or successful response data, it's a success
+- 2xx status codes in API responses
 
 FAILURE CRITERIA:
-- The text indicates failure, an error, or an inability to perform the action.
-- The text asks the user for information it should have had.
-- Error messages or failed API calls.
+- The text indicates failure, an error, or an inability to perform the action
+- The text asks the user for information it should have had
+- Error messages or failed API calls
+- 4xx or 5xx status codes
+- URL construction errors (404 with malformed URLs)
+
+SPECIAL CASES:
+- 404 errors with URLs containing ':parameter' or unresolved placeholders = parameter substitution failure
+- Rate limit errors = temporary failure, suggest retry
+- Missing required fields = prompt needs more context
 
 Respond ONLY with a raw JSON object with "success" (boolean) and "reason" (string) keys.`;
 
@@ -342,18 +369,38 @@ ${outputText || "No text output."}
 
       const jsonResponse = JSON.parse(text);
       if (typeof jsonResponse.success === 'boolean' && typeof jsonResponse.reason === 'string') {
-        console.log(`ℹ️ Analysis Result: Success=${jsonResponse.success}, Reason='${jsonResponse.reason}'`);
-        return jsonResponse;
+        const isPermissionError = outputText.toLowerCase().includes('403') && 
+          (outputText.toLowerCase().includes('permission') || 
+           outputText.toLowerCase().includes('scope') ||
+           outputText.toLowerCase().includes('authentication') ||
+           outputText.toLowerCase().includes('forbidden'));
+
+        console.log(`ℹ️ Analysis Result: Success=${jsonResponse.success}, Reason='${jsonResponse.reason}', Permission Error=${isPermissionError}`);
+        
+        return {
+          ...jsonResponse,
+          isPermissionError
+        };
       }
       throw new Error("Invalid JSON structure from analysis model.");
 
     } catch (error) {
       console.error('Error during LLM-based result analysis:', error);
       const failureKeywords = ['fail', 'error', 'could not', 'unable to', 'provide the id', 'need the specific'];
-      if(failureKeywords.some(kw => outputText.toLowerCase().includes(kw))) {
-          return { success: false, reason: "Fallback: Detected failure keyword in output text." };
-      }
-      return { success: true, reason: "Fallback: No failure keywords detected in output text." };
+      const isError = failureKeywords.some(kw => outputText.toLowerCase().includes(kw));
+      
+      // Also check for permission errors in fallback
+      const isPermissionError = outputText.toLowerCase().includes('403') && 
+        (outputText.toLowerCase().includes('permission') || 
+         outputText.toLowerCase().includes('scope') ||
+         outputText.toLowerCase().includes('authentication') ||
+         outputText.toLowerCase().includes('forbidden'));
+      
+      return {
+        success: !isError,
+        reason: isError ? "Fallback: Detected failure keyword in output text." : "Fallback: No failure keywords detected in output text.",
+        isPermissionError
+      };
     }
   }
 
@@ -445,10 +492,10 @@ Look for phrases like:
   async executeTask(
   taskPrompt: string,
   threadId?: string
-): Promise<{ success: boolean; output?: any; error?: string; extractedData?: any; analysisReason?: string; agentResponse?: string }> {
+): Promise<{ success: boolean; output?: any; error?: string; extractedData?: any; analysisReason?: string; agentResponse?: string; isPermissionError?: boolean }> {
   try {
-    // const knowledgeSeparator = '\n\n---\n';
-    // const promptForDisplay = taskPrompt.split(knowledgeSeparator)[0];
+    const knowledgeSeparator = '\n\n---\n';
+    const promptForDisplay = taskPrompt.split(knowledgeSeparator)[0];
 
     console.log(chalk.gray('\n📝 Prompt being sent to Agent (Knowledge hidden for brevity):'));
     console.log(chalk.gray('─'.repeat(80)));
@@ -483,7 +530,8 @@ Look for phrases like:
       output: outputText,
       extractedData,
       analysisReason: analysis.reason,
-      agentResponse: outputText 
+      agentResponse: outputText,
+      isPermissionError: analysis.isPermissionError 
     };
 
   } catch (error: any) {

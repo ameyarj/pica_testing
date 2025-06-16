@@ -83,20 +83,22 @@ Knowledge snippet: ${action.knowledge.substring(0, 200)}...
 Create a complete dependency graph with execution groups.`;
 
     try {
-      const { object: graph } = await generateObject({
-        model: this.analysisModel,
-        schema: DependencyGraphSchema,
-        system: systemPrompt,
-        prompt: userPrompt,
-      });
+  const { object: graph } = await generateObject({
+    model: this.analysisModel,
+    schema: DependencyGraphSchema,
+    system: systemPrompt,
+    prompt: userPrompt,
+    maxRetries: 2,  
+    temperature: 0.3  
+  });
 
-      return this.validateAndOptimizeGraph(graph, actions);
-    } catch (error) {
-      console.error('Error analyzing dependencies:', error);
-      return this.createFallbackGraph(actions);
-    }
+  return this.validateAndOptimizeGraph(graph, actions);
+} catch (error) {
+  console.error('Error analyzing dependencies:', error);
+  console.log('Falling back to simple dependency analysis...');
+  return this.createFallbackGraph(actions);
+}
   }
-
   private validateAndOptimizeGraph(graph: DependencyGraph, actions: ModelDefinition[]): DependencyGraph {
     const actionIds = new Set(actions.map(a => a._id));
     const graphIds = new Set(graph.nodes.map(n => n.id));

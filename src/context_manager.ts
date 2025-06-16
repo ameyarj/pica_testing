@@ -63,21 +63,40 @@ export class ContextManager {
   storePathParameters(pathTemplate: string, extractedData: any): void {
   if (!extractedData?.ids) return;
   
-  const pathParams = pathTemplate.match(/\{\{(\w+)\}\}/g) || [];
+  const templateParams = pathTemplate.match(/\{\{(\w+)\}\}/g) || [];
+  const colonParams = pathTemplate.match(/:(\w+)/g) || [];
   
-  for (const param of pathParams) {
-    const paramName = param.replace(/[{}]/g, '');
-    
+  const allParams = [
+    ...templateParams.map(p => p.replace(/[{}]/g, '')),
+    ...colonParams.map(p => p.substring(1))
+  ];
+  
+  for (const paramName of allParams) {
     if (extractedData.ids[paramName]) {
-      if (!this.globalContext.availableIds.has(paramName)) {
-        this.globalContext.availableIds.set(paramName, []);
-      }
-      const existingIds = this.globalContext.availableIds.get(paramName)!;
-      if (!existingIds.includes(extractedData.ids[paramName])) {
-        existingIds.push(extractedData.ids[paramName]);
-        console.log(`[ContextManager] Storing path parameter: ${paramName} = ${extractedData.ids[paramName]}`);
+      this.storeId(paramName, extractedData.ids[paramName]);
+    }
+    else if (extractedData.ids[paramName + 'Id']) {
+      this.storeId(paramName, extractedData.ids[paramName + 'Id']);
+      this.storeId(paramName + 'Id', extractedData.ids[paramName + 'Id']);
+    }
+    else if (paramName.endsWith('Id')) {
+      const baseParam = paramName.slice(0, -2);
+      if (extractedData.ids[baseParam]) {
+        this.storeId(paramName, extractedData.ids[baseParam]);
+        this.storeId(baseParam, extractedData.ids[baseParam]);
       }
     }
+  }
+}
+
+private storeId(key: string, value: string): void {
+  if (!this.globalContext.availableIds.has(key)) {
+    this.globalContext.availableIds.set(key, []);
+  }
+  const existingIds = this.globalContext.availableIds.get(key)!;
+  if (!existingIds.includes(value)) {
+    existingIds.push(value);
+    console.log(`[ContextManager] Storing ID: ${key} = ${value}`);
   }
 }
 

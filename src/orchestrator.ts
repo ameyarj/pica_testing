@@ -31,6 +31,7 @@ export class EnhancedPicaosTestingOrchestrator {
   private promptGenerator: EnhancedPromptGenerator;
   private maxRetriesPerAction: number = 3;
   private useClaudeModels: boolean = true;
+  private permissionFailedActions: Set<string> = new Set();
 
   constructor(picaSdkSecretKey: string, openAIApiKey: string) {
     this.picaApiService = new PicaApiService(picaSdkSecretKey);
@@ -176,15 +177,18 @@ if (!pathValidation.canExecute) {
       console.log(chalk.bold.blue(`\n🎯 Testing: "${action.title}" (${action.modelName})`));
       if (actionMetadata) {
         console.log(chalk.gray(`   Priority: ${actionMetadata.priority}, Optional: ${actionMetadata.isOptional}`));
-      }
-
-      const result = await this.executeActionWithSmartRetries(action, 1, dependencyGraph);
+      }      const result = await this.executeActionWithSmartRetries(action, 1, dependencyGraph);
       results.push(result);
 
       this.contextManager.updateContext(action, result, result.extractedData);
 
       if (!result.success) {
-        failedActions.push({ action, result, reason: "execution_failed" });
+        if (result.isPermissionError) {
+          this.permissionFailedActions.add(action._id);
+          console.log(chalk.red(`   ⛔ Permission error - will not retry`));
+        } else {
+          failedActions.push({ action, result, reason: "execution_failed" });
+        }
       }
     }
 
@@ -193,58 +197,30 @@ if (!pathValidation.canExecute) {
       
       const pass2Failures: typeof failedActions = [];
       
-      for (const { action, result: pass1Result, reason } of failedActions) {
-        console.log(chalk.bold.yellow(`\n🔁 Retrying: "${action.title}"`));
-        console.log(chalk.gray(`   Previous failure: ${pass1Result.error}`));
-        
-        const knowledgeToUse = pass1Result.finalKnowledge || action.knowledge;
-        const enhancedAction = { ...action, knowledge: knowledgeToUse };
-        
-        const pass2Result = await this.executeActionWithSmartRetries(
-          enhancedAction, 
-          2, 
-          dependencyGraph,
-          pass1Result.error
-        );
-        
-        const originalIndex = results.findIndex(r => 
-          r.actionTitle === action.title && r.modelName === action.modelName
-        );
-        if (originalIndex >= 0) {
-          results[originalIndex] = {
-            ...pass2Result,
-            attempts: pass1Result.attempts + pass2Result.attempts,
-            originalKnowledge: action.knowledge,
-            passNumber: 2
-          };
-        }
-        
-        if (!pass2Result.success) {
-          pass2Failures.push({ action: enhancedAction, result: pass2Result, reason: "pass2_failed" });
-        } else {
-          this.contextManager.updateContext(enhancedAction, pass2Result, pass2Result.extractedData);
-        }
-      }
+      const retryableFailures = failedActions.filter(
+        f => !this.permissionFailedActions.has(f.action._id)
+      );
       
-      if (pass2Failures.length > 0) {
-        console.log(chalk.bold.inverse(`\n\n🔄 PASS 3: Final Attempt for ${pass2Failures.length} Stubborn Failures 🔄`));
+      if (retryableFailures.length > 0) {
+        console.log(chalk.bold.inverse(
+          `\n\n🔄 PASS 2: Retrying ${retryableFailures.length} Failed Actions` + 
+          `${failedActions.length - retryableFailures.length > 0 ? 
+            ` (${failedActions.length - retryableFailures.length} skipped due to permissions)` : 
+            ''} 🔄`
+        ));
         
-        const metaStrategy = await this.promptGenerator.generateMetaPrompt(
-          pass2Failures,
-          this.contextManager.getContext()
-        );
-        
-        console.log(chalk.magenta("\n🧠 Meta-strategy generated for remaining failures"));
-        
-        for (const { action, result: pass2Result } of pass2Failures) {
-          console.log(chalk.bold.red(`\n🎲 Final attempt: "${action.title}"`));
+        for (const { action, result: pass1Result, reason } of retryableFailures) {
+          console.log(chalk.bold.yellow(`\n🔁 Retrying: "${action.title}"`));
+          console.log(chalk.gray(`   Previous failure: ${pass1Result.error}`));
           
-          const pass3Result = await this.executeActionWithMetaStrategy(
-            action,
-            3,
+          const knowledgeToUse = pass1Result.finalKnowledge || action.knowledge;
+          const enhancedAction = { ...action, knowledge: knowledgeToUse };
+          
+          const pass2Result = await this.executeActionWithSmartRetries(
+            enhancedAction, 
+            2, 
             dependencyGraph,
-            metaStrategy,
-            pass2Result.error
+            pass1Result.error
           );
           
           const originalIndex = results.findIndex(r => 
@@ -252,17 +228,60 @@ if (!pathValidation.canExecute) {
           );
           if (originalIndex >= 0) {
             results[originalIndex] = {
-              ...pass3Result,
-              attempts: results[originalIndex].attempts + pass3Result.attempts,
-              originalKnowledge: results[originalIndex].originalKnowledge,
-              passNumber: 3
+              ...pass2Result,
+              attempts: pass1Result.attempts + pass2Result.attempts,
+              originalKnowledge: action.knowledge,
+              passNumber: 2
             };
           }
           
-          if (pass3Result.success) {
-            this.contextManager.updateContext(action, pass3Result, pass3Result.extractedData);
+          if (!pass2Result.success) {
+            pass2Failures.push({ action: enhancedAction, result: pass2Result, reason: "pass2_failed" });
+          } else {
+            this.contextManager.updateContext(enhancedAction, pass2Result, pass2Result.extractedData);
           }
         }
+        
+        if (pass2Failures.length > 0) {
+          console.log(chalk.bold.inverse(`\n\n🔄 PASS 3: Final Attempt for ${pass2Failures.length} Stubborn Failures 🔄`));
+          
+          const metaStrategy = await this.promptGenerator.generateMetaPrompt(
+            pass2Failures,
+            this.contextManager.getContext()
+          );
+          
+          console.log(chalk.magenta("\n🧠 Meta-strategy generated for remaining failures"));
+          
+          for (const { action, result: pass2Result } of pass2Failures) {
+            console.log(chalk.bold.red(`\n🎲 Final attempt: "${action.title}"`));
+            
+            const pass3Result = await this.executeActionWithMetaStrategy(
+              action,
+              3,
+              dependencyGraph,
+              metaStrategy,
+              pass2Result.error
+            );
+            
+            const originalIndex = results.findIndex(r => 
+              r.actionTitle === action.title && r.modelName === action.modelName
+            );
+            if (originalIndex >= 0) {
+              results[originalIndex] = {
+                ...pass3Result,
+                attempts: results[originalIndex].attempts + pass3Result.attempts,
+                originalKnowledge: results[originalIndex].originalKnowledge,
+                passNumber: 3
+              };
+            }
+            
+            if (pass3Result.success) {
+              this.contextManager.updateContext(action, pass3Result, pass3Result.extractedData);
+            }
+          }
+        }
+      } else {
+        console.log(chalk.yellow.inverse("\n\n⚠️ All failures were due to permission errors - skipping Pass 2"));
       }
     }
 
@@ -389,6 +408,23 @@ if (!pathValidation.canExecute) {
         strategyUsed,
         dependenciesMet: true,
         analysisReason: agentResult.analysisReason
+      };
+    } else if (agentResult.isPermissionError) {
+      console.log(chalk.red(`   ⛔ Permission/Authentication error detected`));
+      return {
+        success: false,
+        error: agentResult.error || "Permission denied",
+        originalKnowledge: action.knowledge,
+        finalKnowledge: currentKnowledge,
+        attempts,
+        actionTitle: action.title,
+        modelName: action.modelName,
+        extractedData,
+        passNumber,
+        strategyUsed,
+        dependenciesMet: true,
+        analysisReason: agentResult.analysisReason,
+        isPermissionError: true
       };
     }
 
@@ -521,7 +557,8 @@ if (!pathValidation.canExecute) {
     dependencyGraph: any
   ): void {
     const successes = results.filter(r => r.success);
-    const failures = results.filter(r => !r.success && !r.error?.includes("Skipped"));
+    const failures = results.filter(r => !r.success && !r.error?.includes("Skipped") && !r.isPermissionError);
+    const permissionErrors = results.filter(r => r.isPermissionError);
     const skipped = results.filter(r => r.error?.includes("Skipped"));
     
     const pass1Success = successes.filter(r => r.passNumber === 1);
@@ -544,26 +581,35 @@ if (!pathValidation.canExecute) {
     console.log(`  Pass 3: ${chalk.cyan(`${pass3Success.length} successes`)} with meta-strategy`);
     
     if (failures.length > 0) {
-  console.log(chalk.bold.red(`\n❌ Failed Actions (${failures.length}):`));
-  failures.forEach(result => {
-    const metadata = dependencyGraph.nodes.find((n: any) => 
-      n.actionName === result.actionTitle && n.modelName === result.modelName
-    );
-    console.log(`  • ${result.actionTitle} (${result.modelName})`);
-    
-    const errorReason = result.analysisReason || result.error || "Unknown error";
-    console.log(chalk.red(`    Error: ${errorReason}`));
-    
-    console.log(chalk.gray(`    Attempts: ${result.attempts}, Pass: ${result.passNumber}`));
-    if (!result.dependenciesMet) {
-      console.log(chalk.yellow(`    Dependencies were not met`));
+      console.log(chalk.bold.red(`\n❌ Failed Actions (${failures.length}):`));
+      failures.forEach(result => {
+        const metadata = dependencyGraph.nodes.find((n: any) => 
+          n.actionName === result.actionTitle && n.modelName === result.modelName
+        );
+        console.log(`  • ${result.actionTitle} (${result.modelName})`);
+        
+        const errorReason = result.analysisReason || result.error || "Unknown error";
+        console.log(chalk.red(`    Error: ${errorReason}`));
+        
+        console.log(chalk.gray(`    Attempts: ${result.attempts}, Pass: ${result.passNumber}`));
+        if (!result.dependenciesMet) {
+          console.log(chalk.yellow(`    Dependencies were not met`));
+        }
+        
+        if (result.extractedData && Object.keys(result.extractedData.ids || {}).length > 0) {
+          console.log(chalk.gray(`    Extracted IDs: ${JSON.stringify(result.extractedData.ids)}`));
+        }
+      });
     }
-    
-    if (result.extractedData && Object.keys(result.extractedData.ids || {}).length > 0) {
-      console.log(chalk.gray(`    Extracted IDs: ${JSON.stringify(result.extractedData.ids)}`));
+
+    if (permissionErrors.length > 0) {
+      console.log(chalk.bold.red(`\n⛔ Permission/Authentication Errors (${permissionErrors.length}):`));
+      console.log(chalk.gray("These require developer intervention to fix scopes/permissions\n"));
+      permissionErrors.forEach(result => {
+        console.log(`  • ${result.actionTitle} (${result.modelName})`);
+        console.log(chalk.red(`    ${result.analysisReason || result.error}`));
+      });
     }
-  });
-}
     
     console.log(chalk.bold("\n💡 Insights & Recommendations:"));
     
@@ -593,10 +639,13 @@ if (!pathValidation.canExecute) {
       console.log(`  • Knowledge refined for ${refinedActions.length} actions (${refinedSuccess} succeeded after refinement)`);
     }
     
-    const status = failures.length === 0 && totalAttempted > 0 ? 
+    const status = failures.length === 0 && permissionErrors.length === 0 && totalAttempted > 0 ? 
       chalk.green.inverse("\n✨ All actions completed successfully! ✨") :
-      totalAttempted === 0 ? chalk.blue("\n🤷 No actions were attempted.") :
-      chalk.yellow.inverse(`\n⚠️ ${failures.length} actions still need attention.`);
+      permissionErrors.length > 0 && failures.length === 0 ?
+      chalk.yellow.inverse(`\n⚠️ ${permissionErrors.length} actions blocked by permissions`) :
+      totalAttempted === 0 ? 
+      chalk.blue("\n🤷 No actions were attempted.") :
+      chalk.yellow.inverse(`\n⚠️ ${failures.length} actions failed, ${permissionErrors.length} blocked by permissions`);
     
     console.log(status);
   }
