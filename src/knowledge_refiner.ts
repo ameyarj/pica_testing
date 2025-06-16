@@ -3,7 +3,7 @@ import { anthropic } from "@ai-sdk/anthropic";
 import { generateText, generateObject, LanguageModel } from "ai";
 import { z } from 'zod';
 import { ModelDefinition, ExecutionContext } from './interface';
-import { ModelSelector } from './model_selector';
+import { EnhancedModelSelector } from './enhanced_model_selector';
 
 const RefinementSchema = z.object({
   knowledge: z.string().nullable().describe("Updated knowledge text, or null if no changes needed"),
@@ -191,16 +191,16 @@ ${originalKnowledge}
 
 Provide specific refinements to fix this error. Focus on making the prompt use context values directly.`;
 
-    const fullPrompt = systemPrompt + userPrompt;
-    const shouldUseGPT = ModelSelector.shouldUseGPT(
-      fullPrompt + originalKnowledge + (agentResponse || ''),
-      this.useClaudeForRefinement
-    );
-
-    const modelToUse = shouldUseGPT ? openai("gpt-4o") : this.llmModel;
+    const fullContent = systemPrompt + userPrompt + originalKnowledge + (agentResponse || '');
+    const inputLength = fullContent.length;
+    const modelToUse = EnhancedModelSelector.selectModel('refinement', inputLength, this.useClaudeForRefinement);
+    
+    const model = modelToUse === 'claude-sonnet-4-20250514' ? 
+      anthropic("claude-sonnet-4-20250514") : 
+      openai(modelToUse);
 
     const { object: refinement } = await generateObject({
-      model: modelToUse,
+      model,
       schema: RefinementSchema,
       system: systemPrompt,
       prompt: userPrompt,

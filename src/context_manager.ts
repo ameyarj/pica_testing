@@ -9,6 +9,7 @@ export class ContextManager {
       platformSummary: "",
       recentActions: [],
       createdResources: new Map(),
+      availableNames: new Map(),
       availableIds: new Map()
     };
   }
@@ -34,6 +35,17 @@ export class ContextManager {
           this.globalContext.createdResources.set(key, value);
         }
       }
+      if (extractedData.names) {
+        for (const [key, name] of Object.entries(extractedData.names)) {
+          if (typeof name === 'string') {
+            const idKey = key.replace('Name', 'Id');
+            if (!this.globalContext.availableNames) {
+              this.globalContext.availableNames = new Map();
+            }
+            this.globalContext.availableNames.set(idKey, name);
+          }
+        }
+      }
 
       if (extractedData.ids) {
         for (const [key, id] of Object.entries(extractedData.ids)) {
@@ -55,6 +67,7 @@ export class ContextManager {
           this.globalContext.createdResources.set(key, list);
         }
       }
+      
     }
 
     this.updatePlatformSummary();
@@ -144,7 +157,8 @@ private storeId(key: string, value: string): void {
       platformSummary: this.globalContext.platformSummary,
       recentActions: [...this.globalContext.recentActions],
       createdResources: new Map(this.globalContext.createdResources),
-      availableIds: new Map(this.globalContext.availableIds)
+      availableIds: new Map(this.globalContext.availableIds),
+      availableNames: new Map(this.globalContext.availableNames)
     };
     return newContext;
   }
@@ -159,7 +173,8 @@ private storeId(key: string, value: string): void {
       platformSummary: "",
       recentActions: [],
       createdResources: new Map(),
-      availableIds: new Map()
+      availableIds: new Map(),
+      availableNames: new Map()
     };
   }
 }

@@ -2,6 +2,7 @@ import { ModelDefinition } from './interface';
 import { openai } from "@ai-sdk/openai";
 import { anthropic } from "@ai-sdk/anthropic";
 import { generateObject, LanguageModel } from "ai";
+import { EnhancedModelSelector } from './enhanced_model_selector';
 import { z } from 'zod';
 
 const DependencyGraphSchema = z.object({
@@ -82,29 +83,35 @@ Knowledge snippet: ${action.knowledge.substring(0, 200)}...
 
 Create a complete dependency graph with execution groups.`;
 
-    try {
-  const { object: graph } = await generateObject({
-    model: this.analysisModel,
-    schema: DependencyGraphSchema,
-    system: systemPrompt,
-    prompt: userPrompt,
-    maxRetries: 2,  
-    temperature: 0.3  
-  });
+    const fullPrompt = systemPrompt + userPrompt;
+    const inputLength = fullPrompt.length;
+    const modelToUse = EnhancedModelSelector.selectModel('dependency', inputLength, this.useClaudeForAnalysis);
+    
+    const model = modelToUse === 'claude-sonnet-4-20250514' ? 
+      anthropic("claude-sonnet-4-20250514") : 
+      openai(modelToUse);
 
-  return this.validateAndOptimizeGraph(graph, actions);
-} catch (error) {
-  console.error('Error analyzing dependencies:', error);
-  console.log('Falling back to simple dependency analysis...');
-  return this.createFallbackGraph(actions);
-}
+    try {
+      const { object: graph } = await generateObject({
+        model,
+        schema: DependencyGraphSchema,
+        system: systemPrompt,
+        prompt: userPrompt,
+        maxRetries: 2,  
+        temperature: 0.3  
+      });
+
+      return this.validateAndOptimizeGraph(graph, actions);
+    } catch (error) {
+      console.error('Error analyzing dependencies:', error);
+      console.log('Falling back to simple dependency analysis...');
+      return this.createFallbackGraph(actions);
+    }
   }
   private validateAndOptimizeGraph(graph: DependencyGraph, actions: ModelDefinition[]): DependencyGraph {
     const actionIds = new Set(actions.map(a => a._id));
     const graphIds = new Set(graph.nodes.map(n => n.id));
 
-    // 1. Ensure every action from the platform exists in the graph.
-    // If the AI missed any, add a fallback node for it.
     for (const action of actions) {
       if (!graphIds.has(action._id)) {
         console.warn(`AI analysis missed an action: "${action.title}". Adding with fallback logic.`);
@@ -112,12 +119,12 @@ Create a complete dependency graph with execution groups.`;
           id: action._id,
           actionName: action.actionName,
           modelName: action.modelName,
-          dependsOn: [], // Start with no dependencies
+          dependsOn: [], 
           providesIds: this.inferProvidedIds(action),
-          requiresIds: this.inferRequiredIds(action), // Reliably get required IDs
+          requiresIds: this.inferRequiredIds(action), 
           priority: this.getDefaultPriority(action),
           canRetry: true,
-          isOptional: false // Assume it's not optional unless specified
+          isOptional: false 
         });
       }
     }

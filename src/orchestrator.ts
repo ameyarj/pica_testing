@@ -6,6 +6,7 @@ import { EnhancedDependencyAnalyzer } from './dependency_analyzer';
 import { EnhancedPromptGenerator } from './prompt_generator';
 import { ConnectionDefinition, ModelDefinition, ActionResult, ExecutionContext } from './interface';
 import { PathParameterResolver } from './path_resolver';
+import { ExecutionLogger } from './execution_logger';
 import readline from 'readline/promises';
 import chalk from 'chalk';
 import * as diff from 'diff';
@@ -31,6 +32,7 @@ export class EnhancedPicaosTestingOrchestrator {
   private promptGenerator: EnhancedPromptGenerator;
   private maxRetriesPerAction: number = 3;
   private useClaudeModels: boolean = true;
+  private logger: ExecutionLogger;
   private permissionFailedActions: Set<string> = new Set();
 
   constructor(picaSdkSecretKey: string, openAIApiKey: string) {
@@ -40,12 +42,11 @@ export class EnhancedPicaosTestingOrchestrator {
     this.contextManager = new ContextManager();
     this.dependencyAnalyzer = new EnhancedDependencyAnalyzer(this.useClaudeModels);
     this.promptGenerator = new EnhancedPromptGenerator(this.useClaudeModels);
+    this.logger = new ExecutionLogger();
   }
 
   public async start(): Promise<void> {
-    console.log(chalk.bold.cyan("🚀 Enhanced PicaOS Testing Suite v2.0 with 3-Pass Strategy 🚀"));
-    console.log(chalk.gray("Using Claude models for enhanced analysis\n"));
-
+   
     try {
       const connections = await this.picaApiService.getAllConnectionDefinitions();
       if (!connections || connections.length === 0) {
@@ -63,6 +64,7 @@ export class EnhancedPicaosTestingOrchestrator {
     } catch (error) {
       console.error("\n💥 An unexpected error occurred:", error);
     } finally {
+      this.logger.generateSummaryReport();
       rl.close();
       console.log("\n👋 Enhanced test suite finished.");
     }
@@ -376,9 +378,9 @@ if (!pathValidation.canExecute) {
     
     strategyUsed = strategy.tone;
     
-    console.log(chalk.gray(`   Strategy: ${strategy.tone}, Context: ${strategy.contextLevel}`));
+    // console.log(chalk.gray(`   Strategy: ${strategy.tone}, Context: ${strategy.contextLevel}`));
     
-    const agentResult = await this.agentService.executeTask(prompt);
+    const agentResult = await this.agentService.executeTask(prompt, undefined, action, attempts);
     
     if (agentResult.success) {
       console.log(chalk.green(`   ✅ SUCCESS: ${agentResult.analysisReason || "Completed"}`));

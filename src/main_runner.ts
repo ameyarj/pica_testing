@@ -5,50 +5,25 @@ import chalk from 'chalk';
 dotenv.config();
 
 async function main() {
-  console.clear();
-  console.log(chalk.bold.cyan(`
-╔═══════════════════════════════════════════════════════════════╗
-║                  PicaOS Automated Testing Suite                ║
-║                        Version 2.0                             ║
-╚═══════════════════════════════════════════════════════════════╝
-  `));
-
   const picaSecretKey = process.env.PICA_SECRET_KEY;
   const openAIApiKey = process.env.OPENAI_API_KEY;
   const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
   const picaUserToken = process.env.PICA_USER_TOKEN;
   
   if (!picaSecretKey) {
-    console.error(chalk.red.bold("💥 FATAL ERROR: PICA_SECRET_KEY environment variable is not set."));
-    console.error(chalk.red("   This key is required to use Pica SDK and OneTool."));
+    process.stderr.write("FATAL ERROR: PICA_SECRET_KEY environment variable is not set.\n");
     process.exit(1);
   }
   
   if (!picaUserToken) {
-    console.error(chalk.red.bold("💥 FATAL ERROR: PICA_USER_TOKEN environment variable is not set."));
-    console.error(chalk.red("   This token is required to fetch connection and model definitions."));
+    process.stderr.write("FATAL ERROR: PICA_USER_TOKEN environment variable is not set.\n");
     process.exit(1);
   }
   
   if (!openAIApiKey && !anthropicApiKey) {
-    console.error(chalk.red.bold("💥 FATAL ERROR: No AI provider API key found."));
-    console.error(chalk.red("   Set either OPENAI_API_KEY or ANTHROPIC_API_KEY in your .env file."));
+    process.stderr.write("FATAL ERROR: No AI provider API key found.\n");
     process.exit(1);
   }
-  
-  console.log(chalk.bold("📋 Configuration:"));
-  console.log(`   • Pica SDK: ${chalk.green("✓ Configured")}`);
-  console.log(`   • Pica User Token: ${chalk.green("✓ Configured")}`);
-  
-  if (anthropicApiKey) {
-    console.log(`   • AI Provider: ${chalk.cyan("claude-sonnet-4-20250514")}`);
-  } else {
-    console.log(`   • AI Provider: ${chalk.yellow("GPT-4.1")}`);
-    console.log(chalk.yellow("   ⚠️  Consider adding ANTHROPIC_API_KEY for better performance"));
-  }
-  
-  console.log(`   • Test Strategy: ${chalk.green("3-Pass with Smart Dependencies")}`);
-  console.log(`   • Max Retries per Action: ${chalk.green("3")}\n`);
 
   try {
     const orchestrator = new EnhancedPicaosTestingOrchestrator(
@@ -58,8 +33,10 @@ async function main() {
     
     await orchestrator.start();
     
+    console.log("\nTest suite completed. Check logs directory for detailed results.");
+    
   } catch (error) {
-    console.error(chalk.red.bold("\n💥 An unhandled error occurred:"), error);
+    process.stderr.write(`\nAn unhandled error occurred: ${error}\n`);
     process.exit(1);
   }
 }

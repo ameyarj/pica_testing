@@ -49,4 +49,21 @@ export interface ExecutionContext {
   }>;
   createdResources: Map<string, any>;
   availableIds: Map<string, string[]>;
+  availableNames: Map<string, string>;
+}
+
+export interface ExtractedDataEnhanced {
+  ids: Record<string, string>;
+  names: Record<string, string>;
+  emails: string[];
+  phones: string[];
+  metadata: Record<string, any>;
+}
+
+export interface ParameterInfo {
+  name: string;
+  type: string;
+  required: boolean;
+  description?: string;
+  example?: any;
 }

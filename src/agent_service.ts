@@ -6,9 +6,11 @@ import { openai } from "@ai-sdk/openai";
 import { anthropic } from "@ai-sdk/anthropic";
 import { generateText, generateObject, LanguageModel } from "ai";
 import { z } from 'zod';
-import { ModelDefinition, ExecutionContext } from './interface';
+import { ModelDefinition, ExecutionContext, ExtractedDataEnhanced } from './interface';
 import { PathParameterResolver } from './path_resolver';
 import { URLValidator } from './url_validator';
+import { EnhancedModelSelector } from './enhanced_model_selector';
+import { ExecutionLogger } from './execution_logger';
 
 import chalk from 'chalk';
 
@@ -16,16 +18,32 @@ const ExtractedDataSchema = z.object({
     ids: z.record(z.string())
         .describe("A dictionary of extracted IDs. The key should be a descriptive name (e.g., 'documentId', 'revisionId') and the value is the ID string.")
         .default({}),
+    names: z.record(z.string())
+        .describe("A dictionary of extracted names. The key should match the ID key (e.g., 'documentName' for 'documentId')")
+        .default({}),
+    emails: z.array(z.string())
+        .describe("Array of any email addresses found in the response")
+        .default([]),
+    phones: z.array(z.string())
+        .describe("Array of any phone numbers found in the response")
+        .default([]),
     created_resources: z.record(z.object({}).passthrough())
         .describe("A dictionary to hold entire JSON objects of newly created resources, keyed by a descriptive name like 'created_document'.")
         .default({}),
     extracted_lists: z.record(z.array(z.unknown()))
         .describe("A dictionary for any arrays or lists of items returned, keyed by a descriptive name like 'document_list'.")
+        .default({}),
+    metadata: z.record(z.any())
+        .describe("Any additional metadata or context from the response")
         .default({})
 }).default({
     ids: {},
+    names: {},
+    emails: [],
+    phones: [],
     created_resources: {},
-    extracted_lists: {}
+    extracted_lists: {},
+    metadata: {}
 });
 
 type ExtractedData = z.infer<typeof ExtractedDataSchema>;
@@ -36,19 +54,22 @@ export class EnhancedAgentService {
   private memory: Memory;
   private analysisModel: LanguageModel;
   private useClaudeForAgent: boolean;
+  private logger: ExecutionLogger;
 
   constructor(
   picaSecretKey: string, 
   openAIApiKey: string,
+  
   useClaudeForAgent: boolean = true
 ) {
   if (!picaSecretKey) {
     throw new Error("PICA_SECRET_KEY is required for EnhancedAgentService.");
   }
+  
   if (!openAIApiKey && !process.env.ANTHROPIC_API_KEY) {
     console.warn("Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY provided; LLM interactions may fail.");
   }
-  
+  this.logger = new ExecutionLogger();
   this.useClaudeForAgent = useClaudeForAgent && !!process.env.ANTHROPIC_API_KEY;
   
   if (this.useClaudeForAgent) {
@@ -118,7 +139,6 @@ You must adapt to any platform (Google, Microsoft, Slack, etc.) and any model (e
       memory: this.memory,
     });
     
-    console.log(`Agent initialized with ${this.useClaudeForAgent ? 'claude-sonnet-4-20250514' : 'GPT-4.1'}`);
   }
 
   private getVerificationSteps(
@@ -212,6 +232,21 @@ You must adapt to any platform (Google, Microsoft, Slack, etc.) and any model (e
   return finalPrompt;
 }
 
+async discoverParameters(action: ModelDefinition): Promise<any> {
+    try {
+      const paramDiscoveryPrompt = `What parameters are required for the action "${action.title}"? List all required and optional parameters with their types and examples.`;
+      
+      const result = await this.agent.generate(paramDiscoveryPrompt, {
+        threadId: `param-discovery-${Date.now()}`,
+        resourceId: action._id
+      });
+
+      return result.text || null;
+    } catch (error) {
+      return null;
+    }
+  }
+
   private buildHumanLikePrompt(
     action: Readonly<ModelDefinition>,
     context: ExecutionContext,
@@ -221,12 +256,28 @@ You must adapt to any platform (Google, Microsoft, Slack, etc.) and any model (e
     let prompt = this.getConversationalOpener(action, context, history);
     
     if (context.availableIds && context.availableIds.size > 0) {
-      prompt += this.buildContextualInstructions(action, context);
-    } else {
-      prompt += this.buildStandaloneInstructions(action);
+      const nameMapping = new Map<string, string>();
+      
+      for (const [idType, idValues] of context.availableIds.entries()) {
+        const nameKey = idType.replace('Id', 'Name');
+        if (context.createdResources.has(nameKey)) {
+          const names = context.createdResources.get(nameKey);
+          if (Array.isArray(names) && names.length > 0) {
+            nameMapping.set(idType, names[0]);
+          }
+        }
+      }
+      
+      if (nameMapping.size > 0) {
+        prompt += "\nI'll work with ";
+        const nameEntries = Array.from(nameMapping.entries());
+        nameEntries.forEach(([idType, name], index) => {
+          prompt += `"${name}"`;
+          if (index < nameEntries.length - 1) prompt += ", ";
+        });
+        prompt += ". ";
+      }
     }
-    
-    prompt += this.getRealisticDataSuggestions(action);
     
     return prompt;
   }
@@ -327,6 +378,13 @@ You must adapt to any platform (Google, Microsoft, Slack, etc.) and any model (e
     outputText: string,
     toolResults: any[]
   ): Promise<{ success: boolean; reason: string; isPermissionError?: boolean }> {
+    const inputLength = outputText.length + 2000; 
+    const modelToUse = EnhancedModelSelector.selectModel('analysis', inputLength, this.useClaudeForAgent);
+    
+    const model = modelToUse === 'claude-sonnet-4-20250514' ? 
+      anthropic("claude-sonnet-4-20250514") : 
+      openai(modelToUse);
+
     const systemPrompt = `You are a Triage Analyst. Your job is to determine if an action succeeded or failed based ONLY on the agent's final text output.
 
 SUCCESS CRITERIA:
@@ -357,7 +415,7 @@ ${outputText || "No text output."}
 `;
     try {
       let { text } = await generateText({
-        model: this.analysisModel,
+        model,
         system: systemPrompt,
         prompt: userPrompt,
       });
@@ -374,8 +432,6 @@ ${outputText || "No text output."}
            outputText.toLowerCase().includes('scope') ||
            outputText.toLowerCase().includes('authentication') ||
            outputText.toLowerCase().includes('forbidden'));
-
-        console.log(`ℹ️ Analysis Result: Success=${jsonResponse.success}, Reason='${jsonResponse.reason}', Permission Error=${isPermissionError}`);
         
         return {
           ...jsonResponse,
@@ -385,11 +441,9 @@ ${outputText || "No text output."}
       throw new Error("Invalid JSON structure from analysis model.");
 
     } catch (error) {
-      console.error('Error during LLM-based result analysis:', error);
       const failureKeywords = ['fail', 'error', 'could not', 'unable to', 'provide the id', 'need the specific'];
       const isError = failureKeywords.some(kw => outputText.toLowerCase().includes(kw));
       
-      // Also check for permission errors in fallback
       const isPermissionError = outputText.toLowerCase().includes('403') && 
         (outputText.toLowerCase().includes('permission') || 
          outputText.toLowerCase().includes('scope') ||
@@ -405,143 +459,194 @@ ${outputText || "No text output."}
   }
 
   private async extractDataWithLLM(outputText: string, toolExecutionResults: any[]): Promise<ExtractedData> {
-  const systemPrompt = `You are a highly precise data extraction engine. Your sole purpose is to extract structured data from an AI agent's output.
+    const inputLength = outputText.length + 3000;
+    const modelToUse = EnhancedModelSelector.selectModel('extraction', inputLength, this.useClaudeForAgent);
+    
+    const model = modelToUse === 'claude-sonnet-4-20250514' ? 
+      anthropic("claude-sonnet-4-20250514") : 
+      modelToUse === 'gpt-4o' ? openai("gpt-4o") : openai("gpt-4.1");
+
+    const systemPrompt = `You are a highly precise data extraction engine. Extract ALL structured data from the AI agent's output.
 
 EXTRACTION RULES:
-1. **Search aggressively**: Look for ANY mention of IDs in the text, including:
-   - Sentences like "created with ID: xyz123" or "document ID is abc456"
-   - JSON blocks with id fields
-   - URLs containing IDs (e.g., /documents/123abc)
-   - Any alphanumeric string that looks like an ID after words like: id, ID, documentId, spreadsheetId, fileId, etc.
+1. **IDs**: Look for any ID mentions (documentId, fileId, etc.)
+2. **Names**: Extract resource names, titles, or labels
+3. **Emails**: Find any email addresses mentioned
+4. **Phones**: Find any phone numbers
+5. **Metadata**: Extract any other structured data
 
-2. **Common ID patterns to find**:
-   - After "ID:", "id:", "ID is", "with ID"
-   - Inside quotes after ID-related words
-   - Long alphanumeric strings (10+ characters)
-   - Strings matching patterns like: 1a2b3c4d5e6f or 123456789012
+ID PATTERNS:
+- After "ID:", "id:", "ID is", "with ID"
+- Inside quotes after ID-related words
+- Long alphanumeric strings (10+ characters)
 
-3. **Extract ALL variations**: If you see "documentId", "document ID", "doc ID" - they all go under "documentId"
+NAME PATTERNS:
+- After "title:", "name:", "label:"
+- Document/file/resource names
+- Any user-friendly identifiers
 
-4. **Be aggressive but accurate**: If it looks like an ID and is mentioned in context of creation/retrieval, extract it.
+Be thorough but accurate.`;
 
-IMPORTANT: The agent often says things like "I created a document with ID: XYZ123" - you MUST extract "XYZ123" as the documentId.`;
-
-  const userPrompt = `Extract ALL IDs and resources from this output:
+    const userPrompt = `Extract ALL data from this output:
 
 ${outputText}
 
-Look for phrases like:
-- "created ... with ID"
-- "document ID is"
-- "ID:"
-- JSON blocks
-- Any ID-like strings after creation/retrieval mentions`;
+Look for IDs, names, emails, phones, and any structured data.`;
 
-  try {
-    const { object: extractedData } = await generateObject({
-      model: this.analysisModel,
-      schema: ExtractedDataSchema,
-      prompt: userPrompt,
-      system: systemPrompt,
-    });
+    try {
+      const { object: extractedData } = await generateObject({
+        model,
+        schema: ExtractedDataSchema,
+        prompt: userPrompt,
+        system: systemPrompt,
+      });
 
-    if ((!extractedData.ids || Object.keys(extractedData.ids).length === 0) && outputText) {
-      const manualIds: Record<string, string> = {};
-      
-      const patterns = [
-        /(?:document\s*)?ID(?:\s*is)?:\s*["']?([a-zA-Z0-9_-]{10,})["']?/gi,
-        /created.*?(?:with\s+)?ID:\s*["']?([a-zA-Z0-9_-]{10,})["']?/gi,
-        /"(?:id|documentId|spreadsheetId|fileId|messageId)"\s*:\s*"([^"]+)"/gi,
-        /(?:documentId|spreadsheetId|fileId)(?:\s+is)?\s*["']?([a-zA-Z0-9_-]{10,})["']?/gi
-      ];
-      
-      for (const pattern of patterns) {
-        let match;
-        while ((match = pattern.exec(outputText)) !== null) {
-          const id = match[1];
-          if (id && id.length >= 10) {
-            const lowerText = outputText.toLowerCase();
-            if (lowerText.includes('document')) {
-              manualIds.documentId = id;
-            } else if (lowerText.includes('spreadsheet')) {
-              manualIds.spreadsheetId = id;
-            } else if (lowerText.includes('file')) {
-              manualIds.fileId = id;
-            } else {
-              manualIds.id = id;
-            }
+      if ((!extractedData.ids || Object.keys(extractedData.ids).length === 0) && outputText) {
+        const manualData = this.manualExtraction(outputText);
+        extractedData.ids = { ...extractedData.ids, ...manualData.ids };
+        extractedData.names = { ...extractedData.names, ...manualData.names };
+      }
+
+      return extractedData;
+
+    } catch (error) {
+      return { ids: {}, names: {}, emails: [], phones: [], created_resources: {}, extracted_lists: {}, metadata: {} };
+    }
+  }
+
+  private manualExtraction(text: string): { ids: Record<string, string>; names: Record<string, string> } {
+    const ids: Record<string, string> = {};
+    const names: Record<string, string> = {};
+    
+    const idPatterns = [
+      /(?:document\s*)?ID(?:\s*is)?:\s*["']?([a-zA-Z0-9_-]{10,})["']?/gi,
+      /"(?:id|documentId|spreadsheetId|fileId)"\s*:\s*"([^"]+)"/gi,
+    ];
+    
+    const namePatterns = [
+      /(?:title|name)(?:\s*is)?:\s*["']([^"']+)["']/gi,
+      /"(?:title|name|label)"\s*:\s*"([^"]+)"/gi,
+    ];
+    
+    for (const pattern of idPatterns) {
+      let match;
+      while ((match = pattern.exec(text)) !== null) {
+        const id = match[1];
+        if (id && id.length >= 10) {
+          if (text.toLowerCase().includes('document')) {
+            ids.documentId = id;
+          } else if (text.toLowerCase().includes('spreadsheet')) {
+            ids.spreadsheetId = id;
+          } else {
+            ids.id = id;
           }
         }
       }
-      
-      if (Object.keys(manualIds).length > 0) {
-        console.log('📍 Manual ID extraction found:', manualIds);
-        extractedData.ids = { ...extractedData.ids, ...manualIds };
+    }
+    
+    for (const pattern of namePatterns) {
+      let match;
+      while ((match = pattern.exec(text)) !== null) {
+        const name = match[1];
+        if (name) {
+          if (text.toLowerCase().includes('document')) {
+            names.documentName = name;
+          } else if (text.toLowerCase().includes('spreadsheet')) {
+            names.spreadsheetName = name;
+          } else {
+            names.name = name;
+          }
+        }
       }
     }
-
-    console.log('✅ Extracted Data:', JSON.stringify(extractedData, null, 2));
-    return extractedData;
-
-  } catch (error) {
-    console.error('Error during LLM-based data extraction:', error);
-    return { ids: {}, created_resources: {}, extracted_lists: {} };
+    
+    return { ids, names };
   }
-}
-
   async executeTask(
-  taskPrompt: string,
-  threadId?: string
-): Promise<{ success: boolean; output?: any; error?: string; extractedData?: any; analysisReason?: string; agentResponse?: string; isPermissionError?: boolean }> {
-  try {
+    taskPrompt: string,
+    threadId?: string,
+    action?: ModelDefinition,
+    attemptNumber: number = 1
+  ): Promise<{ success: boolean; output?: any; error?: string; extractedData?: any; analysisReason?: string; agentResponse?: string; isPermissionError?: boolean }> {
+    const startTime = Date.now();
     const knowledgeSeparator = '\n\n---\n';
     const promptForDisplay = taskPrompt.split(knowledgeSeparator)[0];
 
-    console.log(chalk.gray('\n📝 Prompt being sent to Agent (Knowledge hidden for brevity):'));
-    console.log(chalk.gray('─'.repeat(80)));
-    console.log(chalk.gray(taskPrompt));
-    console.log(chalk.gray('\n[... Technical knowledge block hidden ...]'));
-    console.log(chalk.gray('─'.repeat(80) + '\n'));
-    
-    const result = await this.agent.generate(taskPrompt, {
-      threadId: threadId || `test-${Date.now()}`,
-      resourceId: `resource-${Date.now()}`
-    });
+    try {
+      const result = await this.agent.generate(taskPrompt, {
+        threadId: threadId || `test-${Date.now()}`,
+        resourceId: `resource-${Date.now()}`
+      });
 
-    const outputText = result.text || "";
-    const toolResults = result.toolResults || [];
+      const outputText = result.text || "";
+      const toolResults = result.toolResults || [];
 
-    const extractedData = await this.extractDataWithLLM(outputText, toolResults);
-    const analysis = await this.analyzeExecutionResultWithLLM(outputText, toolResults);
+      const extractedData = await this.extractDataWithLLM(outputText, toolResults);
+      const analysis = await this.analyzeExecutionResultWithLLM(outputText, toolResults);
 
-    if (!analysis.success) {
+      if (action) {
+        const inputTokens = this.logger.estimateTokens(taskPrompt);
+        const outputTokens = this.logger.estimateTokens(outputText);
+        
+        this.logger.logExecution({
+          platform: action.connectionPlatform,
+          model: action.modelName,
+          action: action.actionName,
+          actionId: action._id,
+          attempt: attemptNumber,
+          prompt: {
+            strategy: 'adaptive',
+            length: taskPrompt.length,
+            content: promptForDisplay
+          },
+          response: {
+            success: analysis.success,
+            error: analysis.success ? undefined : analysis.reason,
+            extractedData: extractedData as ExtractedDataEnhanced,
+            agentOutput: outputText.substring(0, 1000), // First 1000 chars
+            analysisReason: analysis.reason
+          },
+          tokens: {
+            model: this.useClaudeForAgent ? 'claude-sonnet-4-20250514' : 'gpt-4.1',
+            input: inputTokens,
+            output: outputTokens,
+            cost: this.logger.calculateCost(
+              this.useClaudeForAgent ? 'claude-sonnet-4-20250514' : 'gpt-4.1',
+              inputTokens,
+              outputTokens
+            )
+          },
+          duration: Date.now() - startTime
+        });
+      }
+
+      if (!analysis.success) {
+        return {
+          success: false,
+          error: analysis.reason,
+          output: outputText,
+          extractedData,
+          analysisReason: analysis.reason,
+          agentResponse: outputText 
+        };
+      }
+      
       return {
-        success: false,
-        error: analysis.reason,
+        success: true,
         output: outputText,
         extractedData,
         analysisReason: analysis.reason,
-        agentResponse: outputText 
+        agentResponse: outputText,
+        isPermissionError: analysis.isPermissionError 
+      };
+
+    } catch (error: any) {
+      return {
+        success: false,
+        error: error.message || "Unknown error during task execution",
+        analysisReason: "Task execution failed with an exception.",
+        agentResponse: error.message
       };
     }
-    
-    return {
-      success: true,
-      output: outputText,
-      extractedData,
-      analysisReason: analysis.reason,
-      agentResponse: outputText,
-      isPermissionError: analysis.isPermissionError 
-    };
-
-  } catch (error: any) {
-    console.error('Error in EnhancedAgentService.executeTask:', error);
-    return {
-      success: false,
-      error: error.message || "Unknown error during task execution",
-      analysisReason: "Task execution failed with an exception." ,
-      agentResponse: error.message
-    };
   }
-}
 }

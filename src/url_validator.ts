@@ -11,20 +11,16 @@ export class URLValidator {
     missingParams?: string[];
     error?: string;
   } {
-    // Extract parameter placeholders from URL
     const paramMatches = url.match(/:(\w+)/g) || [];
     const missingParams: string[] = [];
     let fixedURL = url;
 
-    // Check for double slashes (except after http://)
     fixedURL = fixedURL.replace(/([^:]\/)\/+/g, '$1');
 
-    // Check for missing parameters
     for (const param of paramMatches) {
-      const paramName = param.substring(1); // Remove ':'
+      const paramName = param.substring(1); 
       let paramValue: string | undefined;
 
-      // Try to find value in context
       if (context.availableIds?.has(paramName)) {
         paramValue = context.availableIds.get(paramName)![0];
       } else if (context.availableIds?.has(paramName + 'Id')) {
@@ -32,7 +28,6 @@ export class URLValidator {
       }
 
       if (!paramValue) {
-        // Check if it's already replaced
         if (!fixedURL.includes(param)) continue;
         missingParams.push(paramName);
       } else {
@@ -40,7 +35,6 @@ export class URLValidator {
       }
     }
 
-    // Validate URL structure
     const urlPattern = /^https?:\/\/[^\s]+$/;
     if (!urlPattern.test(fixedURL)) {
       return {
@@ -49,7 +43,6 @@ export class URLValidator {
       };
     }
 
-    // Check if URL still contains unreplaced parameters
     if (fixedURL.match(/:\w+/)) {
       return {
         isValid: false,
@@ -68,13 +61,11 @@ export class URLValidator {
   static extractParametersFromPath(path: string): string[] {
     const params: string[] = [];
     
-    // Match {{param}} style
     const templateMatches = path.match(/\{\{(\w+)\}\}/g) || [];
     templateMatches.forEach(match => {
       params.push(match.replace(/[{}]/g, ''));
     });
 
-    // Match :param style
     const colonMatches = path.match(/:(\w+)/g) || [];
     colonMatches.forEach(match => {
       params.push(match.substring(1));
