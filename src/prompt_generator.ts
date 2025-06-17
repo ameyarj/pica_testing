@@ -42,7 +42,7 @@ export class EnhancedPromptGenerator {
   
   const examples = this.getRelevantExamples(action, context);
   
-  let prompt = await this.buildPrompt(action, context, strategy, examples, dependencyGraph);
+  let prompt = await this.buildPrompt(action, context, strategy, examples, dependencyGraph, previousError);
   
   if (previousResponse) {
     prompt = this.incorporateResponseRefinements(prompt, action, context, previousResponse);
@@ -94,6 +94,16 @@ export class EnhancedPromptGenerator {
   }
   
   if (previousError) {
+    if (previousError && (previousError.includes('403') || previousError.includes('permission') || 
+        previousError.includes('forbidden') || previousError.includes('scope'))) {
+      return {
+        tone: 'technical',
+        emphasis: ['check authentication', 'verify permissions', 'this appears to be a permission issue'],
+        examples: false,
+        contextLevel: 'minimal'
+      };
+    }
+    
     if (previousError.includes('missing') || previousError.includes('required')) {
       return {
         tone: 'step-by-step',
@@ -124,7 +134,8 @@ export class EnhancedPromptGenerator {
   context: ExecutionContext,
   strategy: PromptStrategy,
   examples: string[],
-  dependencyGraph?: any
+  dependencyGraph?: any,
+  previousError?: string // Add this parameter
 ): Promise<string> {
   let prompt = '';
   
@@ -140,6 +151,14 @@ export class EnhancedPromptGenerator {
         prompt += `• ${reqId}: "${value}" (USE THIS - already created)\n`;
       }
     }
+
+    if (action._id && previousError && 
+        (previousError.includes('403') || previousError.includes('permission'))) {
+      prompt = "⚠️ **PERMISSION ERROR DETECTED**\n" +
+        "This action previously failed due to insufficient permissions or scopes.\n" +
+        "The connector may need additional OAuth scopes to perform this action.\n\n" + prompt;
+    }
+    
     prompt += "\n";
   }
   
@@ -336,7 +355,6 @@ private buildPathSection(action: ModelDefinition, context: ExecutionContext): st
     section += `\n\n⚠️ CRITICAL: Missing required parameters for this action:\n`;
     missingParams.forEach(param => {
       section += `• ${param} - `;
-      // Check if we have a similar parameter in context
       if (context.availableIds) {
         const similarParams = Array.from(context.availableIds.keys())
           .filter(key => key.toLowerCase().includes(param.toLowerCase()) || 
@@ -386,20 +404,5 @@ private buildPathSection(action: ModelDefinition, context: ExecutionContext): st
     this.promptHistory.set(actionId, history);
   }
 
-  async generateMetaPrompt(failedActions: any[], context: ExecutionContext): Promise<string> {
-    const systemPrompt = `You are a master troubleshooter. Multiple actions have failed despite retries. 
-    Generate a comprehensive strategy to make them succeed.`;
-    
-    const userPrompt = `Failed actions:\n${failedActions.map(f => 
-      `- ${f.action.title}: ${f.error}`
-    ).join('\n')}\n\nCreate a unified approach to fix these.`;
-    
-    const { text } = await generateText({
-      model: this.llmModel,
-      system: systemPrompt,
-      prompt: userPrompt,
-    });
-    
-    return text;
-  }
+  
 }

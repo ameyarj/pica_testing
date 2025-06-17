@@ -4,6 +4,8 @@ import chalk from 'chalk';
 
 dotenv.config();
 
+let orchestrator: EnhancedPicaosTestingOrchestrator | null = null;
+
 async function main() {
   const picaSecretKey = process.env.PICA_SECRET_KEY;
   const openAIApiKey = process.env.OPENAI_API_KEY;
@@ -26,7 +28,7 @@ async function main() {
   }
 
   try {
-    const orchestrator = new EnhancedPicaosTestingOrchestrator(
+    orchestrator = new EnhancedPicaosTestingOrchestrator(
       picaSecretKey, 
       openAIApiKey || "" 
     );
@@ -43,6 +45,9 @@ async function main() {
 
 process.on('SIGINT', () => {
   console.log(chalk.yellow('\n\n⚠️  Test suite interrupted by user.'));
+  if (orchestrator) {
+    orchestrator.handleInterrupt();
+  }
   process.exit(0);
 });
 

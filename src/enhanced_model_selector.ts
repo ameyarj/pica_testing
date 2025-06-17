@@ -1,3 +1,5 @@
+import chalk from 'chalk';
+
 export class EnhancedModelSelector {
   private static readonly TOKEN_THRESHOLDS = {
     CLAUDE_MAX_INPUT: 20000,
@@ -10,33 +12,56 @@ export class EnhancedModelSelector {
     inputLength: number,
     hasClaude: boolean = true
   ): 'claude-sonnet-4-20250514' | 'gpt-4.1' | 'gpt-4o' {
-    if (!hasClaude) return 'gpt-4.1';
+    if (!hasClaude) {
+      console.log(chalk.gray(`   (ModelSelector: Using gpt-4.1 as Claude is not available)`));
+      return 'gpt-4.1';
+    }
 
     const estimatedTokens = Math.ceil(inputLength / 4);
 
     switch (task) {
       case 'agent':
-        return estimatedTokens > this.TOKEN_THRESHOLDS.CLAUDE_MAX_INPUT ? 'gpt-4.1' : 'claude-sonnet-4-20250514';
+        if (estimatedTokens > this.TOKEN_THRESHOLDS.CLAUDE_MAX_INPUT) {
+          console.log(chalk.gray(`   (ModelSelector: Switching to gpt-4.1 for ${task} due to token limit: ~${estimatedTokens} tokens)`));
+          return 'gpt-4.1';
+        }
+        return 'claude-sonnet-4-20250514';
       
       case 'analysis':
-        return estimatedTokens > this.TOKEN_THRESHOLDS.LARGE_CONTEXT ? 'gpt-4.1' : 'claude-sonnet-4-20250514';
+        if (estimatedTokens > this.TOKEN_THRESHOLDS.LARGE_CONTEXT) {
+          console.log(chalk.gray(`   (ModelSelector: Switching to gpt-4.1 for ${task} due to large context: ~${estimatedTokens} tokens)`));
+          return 'gpt-4.1';
+        }
+        return 'claude-sonnet-4-20250514';
       
       case 'dependency':
-        return estimatedTokens > this.TOKEN_THRESHOLDS.PREFER_GPT_ABOVE ? 'gpt-4.1' : 'claude-sonnet-4-20250514';
+        if (estimatedTokens > this.TOKEN_THRESHOLDS.PREFER_GPT_ABOVE) {
+          console.log(chalk.gray(`   (ModelSelector: Switching to gpt-4.1 for ${task} due to complexity: ~${estimatedTokens} tokens)`));
+          return 'gpt-4.1';
+        }
+        return 'claude-sonnet-4-20250514';
       
       case 'extraction':
-        return estimatedTokens > this.TOKEN_THRESHOLDS.LARGE_CONTEXT ? 'gpt-4o' : 'claude-sonnet-4-20250514';
+        if (estimatedTokens > this.TOKEN_THRESHOLDS.LARGE_CONTEXT) {
+          console.log(chalk.gray(`   (ModelSelector: Switching to gpt-4o for ${task} due to large input: ~${estimatedTokens} tokens)`));
+          return 'gpt-4o';
+        }
+        return 'claude-sonnet-4-20250514';
       
       case 'refinement':
       case 'prompt':
-        return estimatedTokens > this.TOKEN_THRESHOLDS.CLAUDE_MAX_INPUT ? 'gpt-4.1' : 'claude-sonnet-4-20250514';
+        if (estimatedTokens > this.TOKEN_THRESHOLDS.CLAUDE_MAX_INPUT) {
+          console.log(chalk.gray(`   (ModelSelector: Switching to gpt-4.1 for ${task} due to token limit: ~${estimatedTokens} tokens)`));
+          return 'gpt-4.1';
+        }
+        return 'claude-sonnet-4-20250514';
       
       default:
-        return estimatedTokens > this.TOKEN_THRESHOLDS.PREFER_GPT_ABOVE ? 'gpt-4.1' : 'claude-sonnet-4-20250514';
+        if (estimatedTokens > this.TOKEN_THRESHOLDS.PREFER_GPT_ABOVE) {
+          console.log(chalk.gray(`   (ModelSelector: Switching to gpt-4.1 for ${task} due to default threshold: ~${estimatedTokens} tokens)`));
+          return 'gpt-4.1';
+        }
+        return 'claude-sonnet-4-20250514';
     }
-  }
-
-  static shouldUseGPTForCost(estimatedTokens: number): boolean {
-    return estimatedTokens > this.TOKEN_THRESHOLDS.PREFER_GPT_ABOVE;
   }
 }

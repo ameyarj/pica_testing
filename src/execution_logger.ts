@@ -70,7 +70,6 @@ export class ExecutionLogger {
       sessionId: this.sessionId
     };
 
-    // Update totals
     this.totalCost += entry.tokens.cost;
     const modelKey = entry.tokens.model;
     const current = this.modelUsage.get(modelKey) || { tokens: 0, cost: 0 };
@@ -79,11 +78,50 @@ export class ExecutionLogger {
       cost: current.cost + entry.tokens.cost
     });
 
-    // Append to log file
     const logData = JSON.parse(fs.readFileSync(this.currentLogFile, 'utf-8'));
     logData.entries.push(fullEntry);
     fs.writeFileSync(this.currentLogFile, JSON.stringify(logData, null, 2));
   }
+
+  async logExecutionAsync(entry: Omit<LogEntry, 'timestamp' | 'sessionId'>): Promise<void> {
+  const fullEntry: LogEntry = {
+    ...entry,
+    timestamp: new Date().toISOString(),
+    sessionId: this.sessionId
+  };
+
+  this.totalCost += entry.tokens.cost;
+  const modelKey = entry.tokens.model;
+  const current = this.modelUsage.get(modelKey) || { tokens: 0, cost: 0 };
+  this.modelUsage.set(modelKey, {
+    tokens: current.tokens + entry.tokens.input + entry.tokens.output,
+    cost: current.cost + entry.tokens.cost
+  });
+
+  try {
+    const logData = JSON.parse(await fs.promises.readFile(this.currentLogFile, 'utf-8'));
+    logData.entries.push(fullEntry);
+    await fs.promises.writeFile(this.currentLogFile, JSON.stringify(logData, null, 2));
+  } catch (error) {
+    console.error('Error writing to log file:', error);
+  }
+}
+
+async generateSummaryReportAsync(): Promise<void> {
+  try {
+    const summaryContent = await this.buildSummaryContent();
+    const summaryFile = path.join(this.logDir, `${this.sessionId}_summary.md`);
+    await fs.promises.writeFile(summaryFile, summaryContent);
+  } catch (error) {
+    console.error('Error generating summary:', error);
+  }
+}
+
+private async buildSummaryContent(): Promise<string> {
+  const logData = JSON.parse(await fs.promises.readFile(this.currentLogFile, 'utf-8'));
+  let summary = `# Execution Summary\n\n`;
+  return summary;
+}
 
   generateSummaryReport(): void {
     const summaryFile = path.join(this.logDir, `${this.sessionId}_summary.md`);
@@ -129,10 +167,10 @@ export class ExecutionLogger {
 
   calculateCost(model: 'claude-sonnet-4-20250514' | 'gpt-4.1' | 'gpt-4o', inputTokens: number, outputTokens: number): number {
     const pricing = {
-      'claude-sonnet-4-20250514': { input: 0.003, output: 0.015 },
-      'gpt-4.1': { input: 0.01, output: 0.03 },
-      'gpt-4o': { input: 0.005, output: 0.015 }
-    };
+  'claude-sonnet-4-20250514': { input: 0.003, output: 0.015 },
+  'gpt-4.1': { input: 0.002, output: 0.008 },  
+  'gpt-4o': { input: 0.005, output: 0.015 }
+};
     
     const modelPricing = pricing[model] || pricing['gpt-4.1'];
     return (inputTokens * modelPricing.input + outputTokens * modelPricing.output) / 1000;
