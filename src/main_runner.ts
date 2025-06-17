@@ -4,52 +4,51 @@ import chalk from 'chalk';
 
 dotenv.config();
 
-let orchestrator: EnhancedPicaosTestingOrchestrator | null = null;
-
 async function main() {
   const picaSecretKey = process.env.PICA_SECRET_KEY;
   const openAIApiKey = process.env.OPENAI_API_KEY;
   const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
   const picaUserToken = process.env.PICA_USER_TOKEN;
-  
+
   if (!picaSecretKey) {
-    process.stderr.write("FATAL ERROR: PICA_SECRET_KEY environment variable is not set.\n");
+    console.error(chalk.red.bold("FATAL ERROR: PICA_SECRET_KEY environment variable is not set."));
     process.exit(1);
   }
-  
+
   if (!picaUserToken) {
-    process.stderr.write("FATAL ERROR: PICA_USER_TOKEN environment variable is not set.\n");
+    console.error(chalk.red.bold("FATAL ERROR: PICA_USER_TOKEN environment variable is not set."));
     process.exit(1);
   }
-  
+
   if (!openAIApiKey && !anthropicApiKey) {
-    process.stderr.write("FATAL ERROR: No AI provider API key found.\n");
+    console.error(chalk.red.bold("FATAL ERROR: No AI provider API key found (OPENAI_API_KEY or ANTHROPIC_API_KEY)."));
     process.exit(1);
   }
+
+  let orchestrator: EnhancedPicaosTestingOrchestrator | null = null;
+
+  process.on('SIGINT', () => {
+    console.log(chalk.yellow('\n\nCaught interrupt signal (Ctrl+C). Generating final report...'));
+    if (orchestrator) {
+      orchestrator.handleInterrupt(); 
+    }
+    process.exit(0); 
+  });
 
   try {
-    orchestrator = new EnhancedPicaosTestingOrchestrator(
-      picaSecretKey, 
-      openAIApiKey || "" 
-    );
+    orchestrator = new EnhancedPicaosTestingOrchestrator(picaSecretKey, openAIApiKey!);
     
     await orchestrator.start();
-    
-    console.log("\nTest suite completed. Check logs directory for detailed results.");
-    
+
   } catch (error) {
-    process.stderr.write(`\nAn unhandled error occurred: ${error}\n`);
-    process.exit(1);
+    console.error(chalk.red.bold('\n💥 An unhandled error occurred during orchestration:'), error);
+  } finally {
+    console.log(chalk.blue('\nTest suite finished. Generating final summary...'));
+    if (orchestrator) {
+        orchestrator.handleInterrupt(); 
+    }
   }
 }
-
-process.on('SIGINT', () => {
-  console.log(chalk.yellow('\n\n⚠️  Test suite interrupted by user.'));
-  if (orchestrator) {
-    orchestrator.handleInterrupt();
-  }
-  process.exit(0);
-});
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error(chalk.red.bold('\n💥 Unhandled Promise Rejection:'), reason);
@@ -57,6 +56,6 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 main().catch(error => {
-  console.error(chalk.red.bold("💥 Fatal error in main execution:"), error);
+  console.error(chalk.red.bold("💥 A fatal error occurred in the main function:"), error);
   process.exit(1);
 });

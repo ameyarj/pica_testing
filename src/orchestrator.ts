@@ -10,7 +10,8 @@ import { ExecutionLogger } from './execution_logger';
 import readline from 'readline/promises';
 import chalk from 'chalk';
 import * as diff from 'diff';
-
+import * as fs from 'fs';
+import * as path from 'path';
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout
@@ -32,7 +33,7 @@ export class EnhancedPicaosTestingOrchestrator {
   private promptGenerator: EnhancedPromptGenerator;
   private maxRetriesPerAction: number = 3;
   private useClaudeModels: boolean = true;
-  private logger: ExecutionLogger;
+  private logger: ExecutionLogger | undefined;
   private permissionFailedActions: Set<string> = new Set();
 
   constructor(picaSdkSecretKey: string, openAIApiKey: string) {
@@ -42,7 +43,6 @@ export class EnhancedPicaosTestingOrchestrator {
     this.contextManager = new ContextManager();
     this.dependencyAnalyzer = new EnhancedDependencyAnalyzer(this.useClaudeModels);
     this.promptGenerator = new EnhancedPromptGenerator(this.useClaudeModels);
-    this.logger = new ExecutionLogger();
   }
 
   public async start(): Promise<void> {
@@ -62,9 +62,11 @@ export class EnhancedPicaosTestingOrchestrator {
       await this.testPlatform(selectedConnection);
 
     } catch (error) {
-      console.error("\n💥 An unexpected error occurred:", error);
+      console.error("\n💥 An unexpected error occurred in the orchestrator:", error);
     } finally {
-      this.logger.generateSummaryReport();
+      if (this.logger) {
+        this.logger.generateSummaryReport();
+      }
       rl.close();
       console.log("\n👋 Enhanced test suite finished.");
     }
@@ -101,6 +103,7 @@ export class EnhancedPicaosTestingOrchestrator {
     console.log(chalk.bold(`\n📋 Found ${modelDefinitions.length} supported actions for ${connection.name}`));
 
     console.log(chalk.bold(`\n📋 Found ${modelDefinitions.length} actions for ${connection.name}`));
+    this.logger = new ExecutionLogger(connection.name);
 
     this.contextManager.reset();
 
@@ -185,7 +188,7 @@ export class EnhancedPicaosTestingOrchestrator {
       if (actionMetadata) {
         console.log(chalk.gray(`   Priority: ${actionMetadata.priority}, Optional: ${actionMetadata.isOptional}`));
       }
-      const result = await this.executeActionWithSmartRetries(action, 1, dependencyGraph);
+      const result = await this.executeActionWithSmartRetries(action, 1, dependencyGraph,this.maxRetriesPerAction);
       results.push(result);
 
       this.contextManager.updateContext(action, result, result.extractedData);
@@ -224,6 +227,7 @@ export class EnhancedPicaosTestingOrchestrator {
             enhancedAction,
             2,
             dependencyGraph,
+            1,
             pass1Result.error
           );
 
@@ -248,13 +252,16 @@ export class EnhancedPicaosTestingOrchestrator {
       }
     }
 
+    this.saveModifiedKnowledge(connection.name, results);
     this.displayEnhancedSummary(connection, results, dependencyGraph);
   }
 
 
   public handleInterrupt(): void {
     console.log(chalk.blue("\ Shutting down and generating final report..."));
-    this.logger.generateSummaryReport();
+    if (this.logger) {
+      this.logger.generateSummaryReport();
+    }
   }
   private checkDependencies(
     actionId: string, 
@@ -280,6 +287,38 @@ export class EnhancedPicaosTestingOrchestrator {
     return true;
   }
 
+  private saveModifiedKnowledge(platformName: string, results: EnhancedActionResult[]): void {
+  
+  const successfulModified = results.filter(r => 
+    r.success && 
+    r.finalKnowledge && 
+    r.finalKnowledge !== r.originalKnowledge
+  );
+  
+  if (successfulModified.length === 0) {
+    console.log(chalk.gray('\nNo modified knowledge to save.'));
+    return;
+  }
+  
+  const knowledgeDir = path.join(process.cwd(), 'knowledge', platformName);
+  if (!fs.existsSync(knowledgeDir)) {
+    fs.mkdirSync(knowledgeDir, { recursive: true });
+  }
+  
+  console.log(chalk.blue(`\n💾 Saving ${successfulModified.length} refined knowledge files...`));
+  
+  successfulModified.forEach(result => {
+    const actionId = result.actionId || 'unknown';
+    const filename = `${result.actionTitle.replace(/[^a-zA-Z0-9\s-]/g, '')} - ${actionId}.md`;
+    const filepath = path.join(knowledgeDir, filename);
+    
+    const content = `# ${result.actionTitle}\n\n## Model: ${result.modelName}\n\n## Knowledge\n\n${result.finalKnowledge}`;
+    
+    fs.writeFileSync(filepath, content);
+    console.log(chalk.green(`   ✓ Saved: ${filename}`));
+  });
+}
+
   private validateActionPath(
   action: ModelDefinition, 
   context: ExecutionContext
@@ -303,6 +342,7 @@ export class EnhancedPicaosTestingOrchestrator {
   action: ModelDefinition,
   passNumber: number,
   dependencyGraph: any,
+  maxAttempts: number,
   previousError?: string,
 ): Promise<EnhancedActionResult> {
   let currentKnowledge = action.knowledge;
@@ -328,9 +368,9 @@ export class EnhancedPicaosTestingOrchestrator {
     }
   }
 
-  while (attempts < this.maxRetriesPerAction) {
+  while (attempts < maxAttempts) {
     attempts++;
-    console.log(chalk.blue(`   Attempt ${attempts}/${this.maxRetriesPerAction}...`));
+    console.log(chalk.blue(`   Attempt ${attempts}/${maxAttempts}...`));
     const context = this.contextManager.getContext();
     const { prompt, strategy } = await this.promptGenerator.generateAdaptivePrompt(
           { ...action, knowledge: currentKnowledge },
@@ -381,7 +421,8 @@ export class EnhancedPicaosTestingOrchestrator {
         passNumber,
         strategyUsed,
         dependenciesMet: true,
-        analysisReason: agentResult.analysisReason
+        analysisReason: agentResult.analysisReason,
+        actionId: action._id
       };
     } else if (agentResult.isPermissionError) {
       console.log(chalk.red(`   ⛔ Permission/Authentication error detected`));
@@ -399,7 +440,8 @@ export class EnhancedPicaosTestingOrchestrator {
         strategyUsed,
         dependenciesMet: true,
         analysisReason: agentResult.analysisReason,
-        isPermissionError: true
+        isPermissionError: true,
+        actionId: action._id
       };
     }
 
@@ -421,7 +463,8 @@ export class EnhancedPicaosTestingOrchestrator {
         strategyUsed,
         dependenciesMet: true,
         analysisReason: agentResult.analysisReason,
-        isPermissionError: true
+        isPermissionError: true,
+        actionId: action._id
       };
     }
 
@@ -458,7 +501,8 @@ export class EnhancedPicaosTestingOrchestrator {
     passNumber,
     strategyUsed,
     dependenciesMet: true,
-    analysisReason: lastError
+    analysisReason: lastError,
+    actionId: action._id
   };
 }
 

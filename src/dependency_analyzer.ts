@@ -4,6 +4,7 @@ import { anthropic } from "@ai-sdk/anthropic";
 import { generateObject, LanguageModel } from "ai";
 import { EnhancedModelSelector } from './enhanced_model_selector';
 import { z } from 'zod';
+import chalk from 'chalk';
 
 const DependencyGraphSchema = z.object({
   nodes: z.array(z.object({
@@ -73,15 +74,15 @@ Group actions that can run in parallel (same priority, no interdependencies).`;
 
 Actions to analyze:
 ${actions.map(action => `
-ID: ${action._id}
-Title: ${action.title}
-Model: ${action.modelName}
-Action: ${action.actionName}
-Path: ${action.path}
-Knowledge snippet: ${action.knowledge.substring(0, 200)}...
+- ID: ${action._id}
+  Title: ${action.title}
+  Action: ${action.actionName}
+  Path: ${action.path}
+  Provides: ${this.inferProvidedIds(action).join(', ') || 'none'}
+  Requires: ${this.inferRequiredIds(action).join(', ') || 'none'}
 `).join('\n')}
 
-Create a complete dependency graph with execution groups.`;
+Based on the actions above, create a complete dependency graph with execution priority and parallel execution groups.`;
 
     const fullPrompt = systemPrompt + userPrompt;
     const inputLength = fullPrompt.length;
@@ -102,11 +103,16 @@ Create a complete dependency graph with execution groups.`;
       });
 
       return this.validateAndOptimizeGraph(graph, actions);
-    } catch (error) {
-      console.error('Error analyzing dependencies:', error);
-      console.log('Falling back to simple dependency analysis...');
-      return this.createFallbackGraph(actions);
-    }
+    } catch (error: any) {
+  console.error('Error analyzing dependencies:', error);
+
+  if (error.finishReason === 'length' || error.message?.includes('token')) {
+    console.log(chalk.yellow('⚠️  AI analysis failed due to token limits.'));
+  }
+
+  console.log(chalk.blue('Falling back to rule-based dependency analysis...'));
+  return this.createFallbackGraph(actions);
+}
   }
   private validateAndOptimizeGraph(graph: DependencyGraph, actions: ModelDefinition[]): DependencyGraph {
     const actionIds = new Set(actions.map(a => a._id));

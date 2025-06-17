@@ -34,8 +34,8 @@ export interface ActionResult {
   agentResponse?: string;
   analysisReason?: string;
   isPermissionError?: boolean;
+  actionId?: string;
 
-  
 }
 
 export interface ExecutionContext {
