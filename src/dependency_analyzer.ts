@@ -6,6 +6,13 @@ import { EnhancedModelSelector } from './enhanced_model_selector';
 import { z } from 'zod';
 import chalk from 'chalk';
 
+interface ChunkResult {
+  nodes: any[];
+  internalDependencies: Map<string, string[]>;
+  externalRequirements: Map<string, string[]>;
+  externalProvisions: Map<string, string[]>;
+}
+
 const DependencyGraphSchema = z.object({
   nodes: z.array(z.object({
     id: z.string(),
@@ -13,7 +20,13 @@ const DependencyGraphSchema = z.object({
     modelName: z.string(),
     dependsOn: z.array(z.string()).describe("IDs of actions this depends on"),
     providesIds: z.array(z.string()).describe("ID types this action provides (e.g., 'documentId')"),
+    providesNames: z.array(z.string()).describe("Name types this action provides (e.g., 'documentName')"),
+    providesEmails: z.array(z.string()).describe("Email types this action provides"),
+    providesPhones: z.array(z.string()).describe("Phone types this action provides"),
     requiresIds: z.array(z.string()).describe("ID types this action requires"),
+    requiresNames: z.array(z.string()).describe("Name types this action requires"),
+    requiresEmails: z.array(z.string()).describe("Email types this action requires"),
+    requiresPhones: z.array(z.string()).describe("Phone types this action requires"),
     priority: z.number().describe("Execution priority (1-10, lower first)"),
     canRetry: z.boolean().describe("Whether this action can be retried if it fails"),
     isOptional: z.boolean().describe("Whether this action is optional for the test suite")
@@ -40,10 +53,78 @@ export class EnhancedDependencyAnalyzer {
 }
 
   async analyzeDependencies(
-    actions: ModelDefinition[],
-    platformName: string
-  ): Promise<DependencyGraph> {
-    const systemPrompt = `You are an expert API dependency analyzer. Analyze the given actions and create a dependency graph.
+  actions: ModelDefinition[],
+  platformName: string
+): Promise<DependencyGraph> {
+  const CHUNK_SIZE = 15; 
+  
+  if (actions.length <= CHUNK_SIZE) {
+    return this.analyzeActionsDirectly(actions, platformName);
+  }
+  
+  console.log(chalk.blue(`📊 Large action set (${actions.length}). Using divide-and-conquer approach...`));
+  
+  const chunks = this.chunkActions(actions, CHUNK_SIZE);
+  const chunkResults = await this.analyzeChunks(chunks, platformName);
+  
+  const mergedGraph = this.mergeChunkResults(chunkResults, actions);
+  
+  return this.resolveCrossChunkDependencies(mergedGraph, actions);
+}
+
+private chunkActions(actions: ModelDefinition[], chunkSize: number): ModelDefinition[][] {
+  const chunks: ModelDefinition[][] = [];
+  for (let i = 0; i < actions.length; i += chunkSize) {
+    chunks.push(actions.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+
+private async analyzeChunks(
+  chunks: ModelDefinition[][],
+  platformName: string
+): Promise<ChunkResult[]> {
+  const results: ChunkResult[] = [];
+  
+  for (let i = 0; i < chunks.length; i++) {
+    console.log(chalk.gray(`   Analyzing chunk ${i + 1}/${chunks.length}...`));
+    const chunkGraph = await this.analyzeActionsDirectly(chunks[i], platformName);
+    
+    const chunkResult: ChunkResult = {
+      nodes: chunkGraph.nodes,
+      internalDependencies: new Map(),
+      externalRequirements: new Map(),
+      externalProvisions: new Map()
+    };
+    
+    for (const node of chunkGraph.nodes) {
+      const chunkIds = new Set(chunks[i].map(a => a._id));
+      const internal = node.dependsOn.filter(id => chunkIds.has(id));
+      const external = node.dependsOn.filter(id => !chunkIds.has(id));
+      
+      if (internal.length > 0) {
+        chunkResult.internalDependencies.set(node.id, internal);
+      }
+      if (external.length > 0) {
+        chunkResult.externalRequirements.set(node.id, external);
+      }
+      
+      if (node.providesIds.length > 0) {
+        chunkResult.externalProvisions.set(node.id, node.providesIds);
+      }
+    }
+    
+    results.push(chunkResult);
+  }
+  
+  return results;
+}
+
+private async analyzeActionsDirectly(
+  actions: ModelDefinition[],
+  platformName: string
+): Promise<DependencyGraph> {
+  const systemPrompt = `You are an expert API dependency analyzer. Analyze the given actions and create a dependency graph.
 
 ANALYSIS RULES:
 1. CREATE actions usually provide IDs (documentId, spreadsheetId, etc.)
@@ -69,12 +150,8 @@ PRIORITY GUIDELINES:
 
 Mark actions as optional if they're not critical for basic testing.
 Group actions that can run in parallel (same priority, no interdependencies).`;
-    const MAX_ACTIONS_PER_CHUNK = 35;
-    if (actions.length > MAX_ACTIONS_PER_CHUNK) {
-      console.log(chalk.yellow(`⚠️ Too many actions (${actions.length}). Using simplified analysis.`));
-  return this.createFallbackGraph(actions);
-}
-    const userPrompt = `Platform: ${platformName}
+
+  const userPrompt = `Platform: ${platformName}
 
 Actions to analyze:
 ${actions.map(action => `
@@ -82,81 +159,132 @@ ${actions.map(action => `
   Title: ${action.title}
   Action: ${action.actionName}
   Path: ${action.path}
-  Provides: ${this.inferProvidedIds(action).join(', ') || 'none'}
-  Requires: ${this.inferRequiredIds(action).join(', ') || 'none'}
+  Provides: ${this.inferProvidedData(action).join(', ') || 'none'}
+  Requires: ${this.inferRequiredData(action).join(', ') || 'none'}
 `).join('\n')}
 
 Based on the actions above, create a complete dependency graph with execution priority and parallel execution groups.`;
 
-    const fullPrompt = systemPrompt + userPrompt;
-    const inputLength = fullPrompt.length;
-    const modelToUse = EnhancedModelSelector.selectModel('dependency', inputLength, this.useClaudeForAnalysis);
-    
-    const model = modelToUse === 'claude-sonnet-4-20250514' ? 
-      anthropic("claude-sonnet-4-20250514") : 
-      openai(modelToUse);
+  try {
+    const { object: graph } = await generateObject({
+      model: this.analysisModel,
+      schema: DependencyGraphSchema,
+      system: systemPrompt,
+      prompt: userPrompt,
+      maxRetries: 2,
+      temperature: 0.3
+    });
 
-    try {
-      const { object: graph } = await generateObject({
-        model,
-        schema: DependencyGraphSchema,
-        system: systemPrompt,
-        prompt: userPrompt,
-        maxRetries: 2,  
-        temperature: 0.3  
-      });
-
-      return this.validateAndOptimizeGraph(graph, actions);
-    } catch (error: any) {
-  console.error('Error analyzing dependencies:', error);
-
-  if (error.finishReason === 'length' || error.message?.includes('token')) {
-    console.log(chalk.yellow('⚠️  AI analysis failed due to token limits.'));
+    return this.validateAndOptimizeGraph(graph, actions);
+  } catch (error: any) {
+    console.error('Error in chunk analysis:', error);
+    return this.createFallbackGraph(actions);
   }
-
-  console.log(chalk.blue('Falling back to rule-based dependency analysis...'));
-  return this.createFallbackGraph(actions);
 }
+
+private mergeChunkResults(
+  chunkResults: ChunkResult[],
+  allActions: ModelDefinition[]
+): DependencyGraph {
+  const allNodes: any[] = [];
+  const globalDependencies = new Map<string, string[]>();
+  
+  for (const chunk of chunkResults) {
+    allNodes.push(...chunk.nodes);
+    
+    for (const [nodeId, deps] of chunk.internalDependencies) {
+      globalDependencies.set(nodeId, deps);
+    }
   }
+  
+  return {
+    nodes: allNodes,
+    executionGroups: [] 
+  };
+}
+
+private async resolveCrossChunkDependencies(
+  mergedGraph: DependencyGraph,
+  allActions: ModelDefinition[]
+): Promise<DependencyGraph> {
+  // Create provision map
+  const provisionMap = new Map<string, string[]>();
+  for (const node of mergedGraph.nodes) {
+    for (const providedId of node.providesIds) {
+      if (!provisionMap.has(providedId)) {
+        provisionMap.set(providedId, []);
+      }
+      provisionMap.get(providedId)!.push(node.id);
+    }
+  }
+  
+  for (const node of mergedGraph.nodes) {
+    const resolvedDeps = new Set<string>(node.dependsOn);
+    
+    for (const requiredId of node.requiresIds) {
+      const providers = provisionMap.get(requiredId) || [];
+      for (const providerId of providers) {
+        if (providerId !== node.id) {
+          resolvedDeps.add(providerId);
+        }
+      }
+    }
+    
+    node.dependsOn = Array.from(resolvedDeps);
+  }
+  
+  mergedGraph.executionGroups = this.createOptimalExecutionGroups(mergedGraph);
+  
+  return mergedGraph;
+}
   private validateAndOptimizeGraph(graph: DependencyGraph, actions: ModelDefinition[]): DependencyGraph {
     const actionIds = new Set(actions.map(a => a._id));
     const graphIds = new Set(graph.nodes.map(n => n.id));
 
     for (const action of actions) {
-      if (!graphIds.has(action._id)) {
-        console.warn(`AI analysis missed an action: "${action.title}". Adding with fallback logic.`);
-        graph.nodes.push({
-          id: action._id,
-          actionName: action.actionName,
-          modelName: action.modelName,
-          dependsOn: [], 
-          providesIds: this.inferProvidedIds(action),
-          requiresIds: this.inferRequiredIds(action), 
-          priority: this.getDefaultPriority(action),
-          canRetry: true,
-          isOptional: false 
-        });
-      }
-    }
+  if (!graphIds.has(action._id)) {
+    console.warn(`AI analysis missed an action: "${action.title}". Adding with fallback logic.`);
+    
+    const providedData = this.inferProvidedData(action);
+    const requiredData = this.inferRequiredData(action);
+    
+    graph.nodes.push({
+      id: action._id,
+      actionName: action.actionName,
+      modelName: action.modelName,
+      dependsOn: [], 
+      providesIds: providedData.filter(d => d.endsWith('Id')),
+      providesNames: providedData.filter(d => d.endsWith('Name')),
+      providesEmails: providedData.filter(d => d.includes('email') || d.includes('Email')),
+      providesPhones: providedData.filter(d => d.includes('phone') || d.includes('Phone')),
+      requiresIds: requiredData.filter(d => d.endsWith('Id')),
+      requiresNames: requiredData.filter(d => d.endsWith('Name')),
+      requiresEmails: requiredData.filter(d => d.includes('email') || d.includes('Email')),
+      requiresPhones: requiredData.filter(d => d.includes('phone') || d.includes('Phone')),
+      priority: this.getDefaultPriority(action),
+      canRetry: true,
+      isOptional: false 
+    });
+  }
+}
 
     for (const node of graph.nodes) {
-      const actionDef = actions.find(a => a._id === node.id);
-      if (actionDef) {
-        const actualRequiredIds = this.inferRequiredIds(actionDef);
-        if (JSON.stringify(node.requiresIds) !== JSON.stringify(actualRequiredIds)) {
-            console.log(`Correcting dependencies for "${actionDef.title}": From [${node.requiresIds}] to [${actualRequiredIds}]`);
-        }
-        node.requiresIds = actualRequiredIds;
-      }
-
-      node.dependsOn = node.dependsOn.filter(id => {
-        const dependencyExists = actionIds.has(id);
-        if (!dependencyExists) {
-            console.warn(`Node "${node.actionName}" had an invalid dependency on non-existent action ID: ${id}. Removing it.`);
-        }
-        return dependencyExists;
-      });
+    const actionDef = actions.find(a => a._id === node.id);
+    if (actionDef) {
+      const actualRequiredData = this.inferRequiredData(actionDef);
+      const actualProvidedData = this.inferProvidedData(actionDef);
+      
+      node.requiresIds = actualRequiredData.filter(d => d.endsWith('Id'));
+      node.requiresNames = actualRequiredData.filter(d => d.endsWith('Name'));
+      node.requiresEmails = actualRequiredData.filter(d => d.includes('email') || d.includes('Email'));
+      node.requiresPhones = actualRequiredData.filter(d => d.includes('phone') || d.includes('Phone'));
+      
+      node.providesIds = actualProvidedData.filter(d => d.endsWith('Id'));
+      node.providesNames = actualProvidedData.filter(d => d.endsWith('Name'));
+      node.providesEmails = actualProvidedData.filter(d => d.includes('email') || d.includes('Email'));
+      node.providesPhones = actualProvidedData.filter(d => d.includes('phone') || d.includes('Phone'));
     }
+  }
 
     this.detectAndBreakCircularDependencies(graph);
 
@@ -195,6 +323,53 @@ Based on the actions above, create a complete dependency graph with execution pr
     
     return ids;
   }
+
+  private inferProvidedData(action: ModelDefinition): string[] {
+  const data: string[] = [];
+  const actionName = action.actionName.toLowerCase();
+  const modelName = action.modelName.toLowerCase();
+  
+  data.push(...this.inferProvidedIds(action));
+  
+  if (actionName.includes('create') || actionName.includes('update')) {
+    if (modelName.includes('document')) data.push('documentName');
+    if (modelName.includes('spreadsheet')) data.push('spreadsheetName');
+    if (modelName.includes('contact')) data.push('contactName');
+    if (modelName.includes('user')) data.push('userName');
+  }
+  
+  if (modelName.includes('contact') || modelName.includes('user') || modelName.includes('email')) {
+    if (actionName.includes('create')) data.push('email', 'contactEmail');
+  }
+  
+  if (modelName.includes('contact') || modelName.includes('user')) {
+    if (actionName.includes('create')) data.push('phone', 'contactPhone');
+  }
+  
+  return data;
+}
+
+private inferRequiredData(action: ModelDefinition): string[] {
+  const data: string[] = [];
+  
+  data.push(...this.inferRequiredIds(action));
+  
+  const knowledge = action.knowledge.toLowerCase();
+  
+  if (knowledge.includes('email') && !action.actionName.toLowerCase().includes('create')) {
+    data.push('email');
+  }
+  
+  if (knowledge.includes('phone') && !action.actionName.toLowerCase().includes('create')) {
+    data.push('phone');
+  }
+  
+  if (knowledge.includes('name') && action.actionName.toLowerCase().includes('search')) {
+    data.push('name');
+  }
+  
+  return data;
+}
 
   private getDefaultPriority(action: ModelDefinition): number {
     const actionName = action.actionName.toLowerCase();
@@ -284,7 +459,13 @@ Based on the actions above, create a complete dependency graph with execution pr
       modelName: action.modelName,
       dependsOn: [] as string[],
       providesIds: this.inferProvidedIds(action),
+      providesNames: [] as string[],
+      providesEmails: [] as string[],
+      providesPhones: [] as string[],
       requiresIds: this.inferRequiredIds(action),
+      requiresNames: [] as string[],
+      requiresEmails: [] as string[],
+      requiresPhones: [] as string[],
       priority: this.getDefaultPriority(action),
       canRetry: true,
       isOptional: false
