@@ -45,8 +45,8 @@ An intelligent testing framework that automatically tests all API actions across
 
 1. **Clone the repository:**
     ```bash
-    git clone <your-repo-url>
-    cd <repository-folder>
+    git clone (https://github.com/ameyarj/pica_testing)
+    cd pica_testing
     ```
 
 2. **Install dependencies:**
