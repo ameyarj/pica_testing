@@ -76,12 +76,10 @@ Identify:
       prompt: userPrompt,
     });
 
-    // Parse the analysis
     const missingParams: string[] = [];
     const requestedFromUser: string[] = [];
     const shouldHaveUsedFromContext: Record<string, string> = {};
 
-    // Extract patterns like "provide the X" or "need the Y"
     const requestPatterns = [
       /(?:provide|specify|need|require|missing)\s+(?:the\s+)?(\w+)/gi,
       /what\s+is\s+(?:the\s+)?(\w+)/gi,
