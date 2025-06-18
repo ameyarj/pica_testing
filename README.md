@@ -1,240 +1,133 @@
 # PicaOS Automated Testing Suite v2.0
 
-An intelligent testing framework that automatically tests all API actions across multiple platforms integrated with PicaOS. The system uses advanced AI models to understand dependencies, refine knowledge, and ensure comprehensive testing coverage.
+An intelligent testing framework that automatically tests all API actions across multiple platforms integrated with PicaOS. The system uses advanced AI models to understand dependencies, generate adaptive prompts, and ensure comprehensive testing coverage with detailed reporting.
 
 ## 🚀 Key Features
 
-### **3-Pass Testing Strategy**
-1. **Pass 1**: Initial execution with smart dependency ordering
-2. **Pass 2**: Retry failures with enhanced context from successful actions
-3. **Pass 3**: Final attempt using meta-strategies for stubborn failures
+### **2-Pass Smart Testing Strategy**
+1. **Pass 1**: Initial execution leveraging an AI-generated dependency graph to run actions in an optimal order
+2. **Pass 2**: A targeted retry pass for failed actions, using enhanced context gathered from successful runs and refined knowledge
 
 ### **Intelligent Dependency Analysis**
-- Automatically detects action dependencies (e.g., create before update)
-- Orders actions optimally to maximize success rate
-- Identifies which IDs are provided and required by each action
+- Uses AI to automatically detect action dependencies (e.g., a `create` action must precede an `update`)
+- Generates an optimized execution plan with parallelizable groups to increase efficiency
+- Includes a robust rule-based fallback mechanism if AI analysis is not possible
 
-### **Adaptive Prompting**
-- Generates human-like, contextual prompts
-- Adjusts strategy based on action type and previous failures
-- Learns from successful patterns
+### **Adaptive Prompt Generation**
+- Dynamically creates prompts for the AI agent based on the context, action type, and attempt history
+- Switches between `conversational`, `technical`, `step-by-step`, and `contextual` strategies to overcome failures
+- Learns from previous agent responses to refine prompts for subsequent attempts
 
-### **Knowledge Refinement**
-- Automatically enhances action knowledge based on errors
-- Adds context mappings and clarifications
-- Preserves successful patterns for future use
+### **Automated Knowledge Refinement**
+- Analyzes execution errors and automatically suggests and applies improvements
+- Saves successfully refined knowledge to the `knowledge/` directory
+- Displays a color-coded `diff` of knowledge changes for transparency
 
-### **Enhanced Context Management**
-- Tracks all created resources and extracted IDs
-- Automatically uses available IDs in dependent actions
-- Maintains execution history for intelligent retries
+### **Comprehensive Context Management**
+- Maintains a session-aware context, tracking all created resources and their extracted IDs
+- Automatically injects required IDs and resource data into subsequent dependent actions
+
+### **Detailed Logging & Cost Reporting**
+- Generates detailed JSON logs and human-readable Markdown summary reports
+- Includes total estimated cost, token usage per AI model, and success/failure rates per platform
 
 ## 📋 Prerequisites
 
-- Node.js 18+ and npm
-- PicaOS account with API access
-- OpenAI API key (for GPT-4) or Anthropic API key (for Claude 3.5 Sonnet)
-- Pica User Token (from your PicaOS dashboard)
+- Node.js v18+ and npm
+- `ts-node` installed globally (`npm install -g ts-node`) or available via npx
+- A PicaOS account with API access
+- **Pica User Token** obtained from your PicaOS dashboard
+- **AI Provider API Keys**:
+  - **Anthropic API Key** (for Claude 4 Sonnet) - recommended
+  - **OpenAI API Key** (for GPT-4o/GPT-4.1) - alternative
 
 ## 🔧 Installation
 
-1. Clone the repository:
-```bash
-git clone <your-repo-url>
-cd picaos-testing-suite
-```
+1. **Clone the repository:**
+    ```bash
+    git clone <your-repo-url>
+    cd <repository-folder>
+    ```
 
-2. Install dependencies:
-```bash
-npm install
-```
+2. **Install dependencies:**
+    ```bash
+    npm install
+    ```
 
-3. Create a `.env` file:
-```env
-# Required - PicaOS Credentials
-PICA_SECRET_KEY=your_pica_secret_key
-PICA_USER_TOKEN=your_pica_user_token
+3. **Create a `.env` file:**
+    ```env
+    # Required - PicaOS Credentials
+    PICA_SECRET_KEY=your_pica_secret_key
+    PICA_USER_TOKEN=your_pica_user_token
 
-# AI Provider (at least one required)
-ANTHROPIC_API_KEY=your_anthropic_key  # Recommended for best performance
-OPENAI_API_KEY=your_openai_key        # Alternative if Anthropic not available
-```
+    # AI Provider (at least one is required)
+    ANTHROPIC_API_KEY=your_anthropic_api_key  # Recommended
+    OPENAI_API_KEY=your_openai_api_key        # Alternative
+    ```
 
 ## 🏃 Running the Test Suite
 
-Start the enhanced testing suite:
 ```bash
-npm run start
-```
-
-For development with auto-reload:
-```bash
-npm run dev
+npx ts-node src/main_runner.ts
 ```
 
 ## 📁 Project Structure
 
 ```
 src/
-├── enhanced_orchestrator.ts   # Main testing orchestrator with 3-pass strategy
-├── agent_service.ts          # Enhanced agent with Claude/GPT-4 support
-├── dependency_analyzer.ts    # Intelligent dependency analysis
-├── prompt_generator.ts       # Adaptive prompt generation
-├── knowledge_refiner.ts      # AI-powered knowledge enhancement
-├── context_manager.ts        # Tracks resources and execution state
-├── pica_api_service.ts      # PicaOS API interactions
-├── interface.ts             # TypeScript interfaces
-└── main_runner.ts           # Entry point with enhanced UI
+├── orchestrator.ts            # Main orchestrator managing the 2-pass testing strategy
+├── agent_service.ts          # Service to interact with AI models
+├── dependency_analyzer.ts     # Analyzes action dependencies
+├── prompt_generator.ts       # Generates adaptive prompts
+├── knowledge_refiner.ts      # Refines action knowledge
+├── context_manager.ts        # Manages contextual data
+├── pica_api_service.ts       # Interacts with the PicaOS API
+├── execution_logger.ts       # Handles logging and reporting
+├── enhanced_model_selector.ts # Selects the best AI model
+├── path_resolver.ts          # Resolves dynamic URL parameters
+├── url_validator.ts          # Validates and fixes URLs
+├── interface.ts             # Core TypeScript definitions
+└── main_runner.ts           # Application entry point
 ```
 
 ## 🎯 How It Works
 
-### 1. **Platform Selection**
-- Fetches all available platforms from PicaOS
-- User selects which platform to test
-- Loads all actions for that platform
-
-### 2. **Dependency Analysis**
-- AI analyzes all actions to understand dependencies
-- Creates an execution graph with parallel groups
-- Identifies which actions provide/require specific IDs
-
-### 3. **Three-Pass Execution**
-
-#### Pass 1: Initial Smart Execution
-- Executes actions in dependency order
-- Uses adaptive prompting based on action type
-- Extracts and stores all created IDs
-- Tracks successes and failures
-
-#### Pass 2: Context-Enhanced Retry
-- Retries failed actions with full context
-- Uses refined knowledge from Pass 1
-- Leverages successful action data
-- Applies lessons learned from errors
-
-#### Pass 3: Meta-Strategy Final Attempt
-- Generates a unified strategy for remaining failures
-- Uses advanced AI reasoning across all failures
-- Makes final attempts with maximum context
-
-### 4. **Results Summary**
-- Detailed breakdown by pass
-- Strategy effectiveness metrics
-- Actionable recommendations
-- Knowledge refinement suggestions
+1. **Platform Selection**: Choose from available PicaOS platforms
+2. **Dependency Analysis**: AI-powered analysis of action dependencies
+3. **Two-Pass Execution**:
+   - **Pass 1**: Initial execution following dependency graph
+   - **Pass 2**: Context-enhanced retry of failed actions
+4. **Reporting**: Detailed summary reports in `logs/` directory
 
 ## 🧠 AI Model Support
 
-The suite supports both OpenAI and Anthropic models:
-
-### Claude 3.5 Sonnet 
-- Better at understanding complex dependencies
-- More nuanced prompt generation
-- Superior context handling
-- Set `ANTHROPIC_API_KEY` in .env
-
-### GPT-4 Turbo 
-- Good general performance
-- Widely available
-- Set `OPENAI_API_KEY` in .env
+- **claude-sonnet-4-20250514**: Default model (requires `ANTHROPIC_API_KEY`)
+- **gpt-4o**: Used for large inputs (requires `OPENAI_API_KEY`)
+- **gpt-4.1**: Fallback model (requires `OPENAI_API_KEY`)
 
 ## 📊 Understanding the Output
 
-### Success Indicators
-- 🟢 **Green**: Action succeeded
-- 🟡 **Yellow**: Action succeeded with retries
-- 🔵 **Blue**: Action succeeded with context
-- 🔴 **Red**: Action failed after all attempts
+### Execution Indicators
+- ✅ **SUCCESS**: Action completed successfully
+- ❌ **FAILED**: Action failed with reason
+- ⛔ **Permission Error**: Will not be retried
+- 💡 **Refining**: Improving strategy for next attempt
 
-### Execution Groups
-Actions are grouped by dependencies:
-- **Group 1**: Independent actions (can run in parallel)
-- **Group 2**: Actions depending on Group 1
-- **Group N**: Actions depending on previous groups
-
-### Metrics Provided
-- Overall success rate
-- Pass-by-pass breakdown
-- Most effective prompt strategies
-- Knowledge refinement statistics
-- Dependency failure analysis
-
-## 🔍 Debugging
-
-Enable verbose logging:
-```bash
-DEBUG=* npm run start
-```
-
-Check specific components:
-```bash
-DEBUG=orchestrator,agent npm run start
-```
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
-
-## 📝 Best Practices
-
-### For PicaOS Integration Teams
-
-1. **Knowledge Quality**: Ensure action knowledge includes:
-   - Clear parameter descriptions
-   - Example values
-   - Response format
-   - Error scenarios
-
-2. **Dependency Hints**: In action paths, use meaningful parameter names:
-   - Good: `/documents/{{documentId}}/sheets`
-   - Bad: `/documents/{{id}}/sheets`
-
-3. **Action Naming**: Use clear, consistent action names:
-   - `createDocument`, `getDocument`, `updateDocument`, `deleteDocument`
-
-4. **Testing Order**: The system handles this automatically, but logical grouping helps
-
-### For Test Suite Users
-
-1. **Start Simple**: Test one platform at a time
-2. **Review Failures**: Check the detailed error messages
-3. **Update Knowledge**: Use the refinement suggestions to improve action definitions
-4. **Monitor Patterns**: Look for common failure types across actions
+### Final Summary Report
+- Overall success rate and pass breakdown
+- Cost estimates and AI model usage
+- Failed actions and permission errors list
+- Prompt strategy effectiveness
 
 ## 🚨 Troubleshooting
 
-### Common Issues
-
-**"Dependencies not met" errors**
-- The system detected missing prerequisites
-- Check if create actions are properly defined
-- Verify ID extraction is working
-
-**"Format error" failures**
-- Review the knowledge for parameter formats
-- Check if the platform expects specific date/number formats
-- Look at successful similar actions
-
-**High failure rate in Pass 1**
-- Normal for complex platforms
-- Pass 2 and 3 will use context to improve
-- Review if base knowledge needs updates
-
-**API Rate Limits**
-- Add delays between actions if needed
-- Contact PicaOS support for higher limits
-- Use batch operations where available
-
+- **Permission Errors**: Check PicaOS integration permissions
+- **Dependency Issues**: Verify create actions and dependency graph
+- **High Failure Rate**: Review base knowledge for actions
 
 ## 🔐 Security
 
-- Never commit `.env` files
+- Never commit `.env` file
+- Use `.gitignore` for sensitive directories
 - Rotate API keys regularly
-- Use environment-specific credentials
-- Review action outputs for sensitive data
-
+- Handle logs containing sensitive data appropriately
