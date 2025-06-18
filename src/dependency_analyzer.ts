@@ -69,7 +69,11 @@ PRIORITY GUIDELINES:
 
 Mark actions as optional if they're not critical for basic testing.
 Group actions that can run in parallel (same priority, no interdependencies).`;
-
+    const MAX_ACTIONS_PER_CHUNK = 35;
+    if (actions.length > MAX_ACTIONS_PER_CHUNK) {
+      console.log(chalk.yellow(`⚠️ Too many actions (${actions.length}). Using simplified analysis.`));
+  return this.createFallbackGraph(actions);
+}
     const userPrompt = `Platform: ${platformName}
 
 Actions to analyze:

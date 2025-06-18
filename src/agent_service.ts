@@ -54,7 +54,7 @@ export class EnhancedAgentService {
   private memory: Memory;
   private analysisModel: LanguageModel;
   private useClaudeForAgent: boolean;
-  private logger: ExecutionLogger;
+  private logger?: ExecutionLogger;
 
   constructor(
   picaSecretKey: string, 
@@ -69,7 +69,7 @@ export class EnhancedAgentService {
   if (!openAIApiKey && !process.env.ANTHROPIC_API_KEY) {
     console.warn("Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY provided; LLM interactions may fail.");
   }
-  this.logger = new ExecutionLogger();
+  // this.logger = new ExecutionLogger();
   this.useClaudeForAgent = useClaudeForAgent && !!process.env.ANTHROPIC_API_KEY;
   
   if (this.useClaudeForAgent) {
@@ -96,6 +96,10 @@ export class EnhancedAgentService {
   });
 
   this.initializeAgent(openAIApiKey);
+}
+
+setLogger(logger: ExecutionLogger): void {
+  this.logger = logger;
 }
 
   private async initializeAgent(openAIApiKey: string) {
@@ -584,7 +588,7 @@ Look for IDs, names, emails, phones, and any structured data.`;
       const extractedData = await this.extractDataWithLLM(outputText, toolResults);
       const analysis = await this.analyzeExecutionResultWithLLM(outputText, toolResults);
 
-      if (action) {
+      if (action && this.logger) {
         const inputTokens = this.logger.estimateTokens(taskPrompt);
         const outputTokens = this.logger.estimateTokens(outputText);
         

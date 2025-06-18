@@ -103,7 +103,10 @@ export class EnhancedPicaosTestingOrchestrator {
     console.log(chalk.bold(`\n📋 Found ${modelDefinitions.length} supported actions for ${connection.name}`));
 
     console.log(chalk.bold(`\n📋 Found ${modelDefinitions.length} actions for ${connection.name}`));
-    this.logger = new ExecutionLogger(connection.name);
+    if (!this.logger) {
+      this.logger = new ExecutionLogger(connection.name);
+      this.agentService.setLogger(this.logger);
+    }
 
     this.contextManager.reset();
 
@@ -135,46 +138,6 @@ export class EnhancedPicaosTestingOrchestrator {
           attempts: 0,
           passNumber: 1,
           dependenciesMet: true
-        });
-        continue;
-      }
-
-      const dependenciesMet = this.checkDependencies(action._id, dependencyGraph, results);
-      const pathValidation = this.validateActionPath(action, this.contextManager.getContext());
-
-      if (!dependenciesMet && !actionMetadata?.isOptional) {
-        console.log(chalk.yellow(`\n⚠️ Skipping "${action.title}" - Dependencies not met`));
-        failedActions.push({
-          action,
-          result: {
-            actionTitle: action.title,
-            modelName: action.modelName,
-            success: false,
-            error: "Dependencies not met",
-            originalKnowledge: action.knowledge,
-            attempts: 0,
-            passNumber: 1,
-            dependenciesMet: false
-          },
-          reason: "dependencies"
-        });
-        continue;
-      }
-      if (!pathValidation.canExecute) {
-        console.log(chalk.yellow(`\n⚠️ Skipping "${action.title}" - ${pathValidation.reason}`));
-        failedActions.push({
-          action,
-          result: {
-            actionTitle: action.title,
-            modelName: action.modelName,
-            success: false,
-            error: pathValidation.reason || "Path validation failed",
-            originalKnowledge: action.knowledge,
-            attempts: 0,
-            passNumber: 1,
-            dependenciesMet: true
-          },
-          reason: "path_validation"
         });
         continue;
       }
@@ -254,6 +217,9 @@ export class EnhancedPicaosTestingOrchestrator {
 
     this.saveModifiedKnowledge(connection.name, results);
     this.displayEnhancedSummary(connection, results, dependencyGraph);
+    if (this.logger) {
+      this.logger.generateSummaryReport();
+    }
   }
 
 
@@ -289,11 +255,11 @@ export class EnhancedPicaosTestingOrchestrator {
 
   private saveModifiedKnowledge(platformName: string, results: EnhancedActionResult[]): void {
   
-  const successfulModified = results.filter(r => 
-    r.success && 
-    r.finalKnowledge && 
-    r.finalKnowledge !== r.originalKnowledge
-  );
+  const successfulModified = results.filter(r => {
+  return r.success && 
+         r.finalKnowledge && 
+         r.finalKnowledge !== r.originalKnowledge 
+});
   
   if (successfulModified.length === 0) {
     console.log(chalk.gray('\nNo modified knowledge to save.'));
@@ -353,7 +319,16 @@ export class EnhancedPicaosTestingOrchestrator {
   let lastAgentResponse: string | undefined;
 
   const currentContext = this.contextManager.getContext();
-  
+  const dependenciesMet = this.checkDependencies(action._id, dependencyGraph, []);
+  const pathValidation = this.validateActionPath(action, currentContext);
+
+  if (!dependenciesMet && attempts === 1) {
+    console.log(chalk.yellow(`   Dependencies not yet met, but will try anyway`));
+  }
+
+  if (!pathValidation.canExecute && attempts === 1) {
+    console.log(chalk.yellow(`   ${pathValidation.reason}, but will try anyway`));
+  }
   const actionMetadata = this.dependencyAnalyzer.getActionMetadata(action._id, dependencyGraph);
   if (actionMetadata && actionMetadata.requiresIds.length > 0) {
     console.log(chalk.blue(`   Required IDs: ${actionMetadata.requiresIds.join(', ')}`));

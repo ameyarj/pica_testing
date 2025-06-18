@@ -4,7 +4,8 @@ export class EnhancedModelSelector {
   private static readonly TOKEN_THRESHOLDS = {
     CLAUDE_MAX_INPUT: 20000,
     PREFER_GPT_ABOVE: 15000,
-    LARGE_CONTEXT: 10000
+    LARGE_CONTEXT: 10000,
+    DEPENDENCY_FALLBACK: 8000
   };
 
   static selectModel(
@@ -35,9 +36,9 @@ export class EnhancedModelSelector {
         return 'claude-sonnet-4-20250514';
       
       case 'dependency':
-        if (estimatedTokens > this.TOKEN_THRESHOLDS.PREFER_GPT_ABOVE) {
-          console.log(chalk.gray(`   (ModelSelector: Switching to gpt-4.1 for ${task} due to complexity: ~${estimatedTokens} tokens)`));
-          return 'gpt-4.1';
+        if (estimatedTokens > this.TOKEN_THRESHOLDS.DEPENDENCY_FALLBACK) {
+          console.log(chalk.gray(`   (ModelSelector: Token limit approaching, using fallback analysis)`));
+          return 'gpt-4.1'; 
         }
         return 'claude-sonnet-4-20250514';
       

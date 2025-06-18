@@ -46,9 +46,14 @@ export class ExecutionLogger {
 
   constructor(platformName?: string) {
     const now = new Date();
-    const timeStr = now.toISOString().replace(/:/g, '-').replace(/\..+/, '');
+    const istOffset = 5.5 * 60 * 60 * 1000; 
+    const istTime = new Date(now.getTime() + istOffset);
+    const timeStr = istTime.toISOString().replace(/:/g, '-').replace(/\..+/, '').replace('T', ' - ');
     
-    const safePlatformName = platformName ? platformName.replace(/[^a-zA-Z0-9\s-]/g, '_') : 'General';
+    if (!platformName) {
+      throw new Error('Platform name is required for ExecutionLogger');
+    }
+    const safePlatformName = platformName.replace(/[^a-zA-Z0-9\s-]/g, '_');
     this.sessionId = `${safePlatformName} - ${timeStr}`; 
     
     this.logDir = path.join(process.cwd(), 'logs');
@@ -145,16 +150,19 @@ private async buildSummaryContent(): Promise<string> {
       parsingError = error.message;
     }
     
-    if (!logData.entries || logData.entries.length === 0) {
-      fs.writeFileSync(summaryFile, '# Execution Summary\n\nNo actions were logged.');
-      console.log(chalk.bold.green(`\n📊 Summary report generated: ${summaryFile}`));
-      return;
-    }
+    const entries = logData.entries || [];
+
+    const toIST = (dateStr: string): string => {
+      const date = new Date(dateStr);
+      const istOffset = 5.5 * 60 * 60 * 1000;
+      const istTime = new Date(date.getTime() + istOffset);
+      return istTime.toISOString();
+    };
 
     let summary = `# Execution Summary\n\n`;
     summary += `**Session ID:** ${this.sessionId}\n`;
-    summary += `**Start Time:** ${logData.startTime || 'N/A'}\n`;
-    summary += `**End Time:** ${new Date().toISOString()}\n`;
+    summary += `**Start Time (IST):** ${logData.startTime ? toIST(logData.startTime) : 'N/A'}\n`;
+    summary += `**End Time (IST):** ${toIST(new Date().toISOString())}\n`;
     
     if (parsingError) {
       summary += `\n**⚠️ Warning:** The JSON log file was corrupted and could not be fully read. The summary may be incomplete. (Error: ${parsingError})\n`;
