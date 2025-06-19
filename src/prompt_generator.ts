@@ -135,7 +135,7 @@ export class EnhancedPromptGenerator {
   strategy: PromptStrategy,
   examples: string[],
   dependencyGraph?: any,
-  previousError?: string // Add this parameter
+  previousError?: string 
 ): Promise<string> {
   let prompt = '';
   
