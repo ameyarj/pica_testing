@@ -38,12 +38,32 @@ export class ContextManager {
       if (extractedData.names) {
         for (const [key, name] of Object.entries(extractedData.names)) {
           if (typeof name === 'string') {
+            console.log(`[ContextManager] Storing name: ${key} = ${name}`);
             const idKey = key.replace('Name', 'Id');
             if (!this.globalContext.availableNames) {
               this.globalContext.availableNames = new Map();
             }
             this.globalContext.availableNames.set(idKey, name);
+            
+            this.globalContext.availableNames.set(key, name);
           }
+        }
+      }
+
+      if (extractedData.emails && extractedData.emails.length > 0) {
+        console.log(`[ContextManager] Storing emails: ${extractedData.emails.join(', ')}`);
+        this.globalContext.createdResources.set('emails', extractedData.emails);
+      }
+
+      if (extractedData.phones && extractedData.phones.length > 0) {
+        console.log(`[ContextManager] Storing phones: ${extractedData.phones.join(', ')}`);
+        this.globalContext.createdResources.set('phones', extractedData.phones);
+      }
+
+      if (extractedData.metadata && Object.keys(extractedData.metadata).length > 0) {
+        console.log(`[ContextManager] Storing metadata:`, extractedData.metadata);
+        for (const [key, value] of Object.entries(extractedData.metadata)) {
+          this.globalContext.createdResources.set(`metadata_${key}`, value);
         }
       }
 
@@ -142,6 +162,13 @@ private storeId(key: string, value: string): void {
         summary += "\nAvailable IDs in Context:\n"
         for(const [key, ids] of this.globalContext.availableIds.entries()) {
             summary += `- ${key}: ${ids.length} available\n`
+        }
+    }
+
+    if (this.globalContext.availableNames && this.globalContext.availableNames.size > 0) {
+        summary += "\nAvailable Names in Context:\n"
+        for(const [key, name] of this.globalContext.availableNames.entries()) {
+            summary += `- ${key}: "${name}"\n`
         }
     }
 

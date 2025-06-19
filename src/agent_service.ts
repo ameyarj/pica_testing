@@ -472,26 +472,26 @@ ${outputText || "No text output."}
 
     const systemPrompt = `You are a comprehensive data extraction engine. Extract ALL meaningful data from API responses.
 
-EXTRACTION PRIORITIES (in order):
-1. **NAMES/TITLES**: Any human-readable names, titles, labels, subjects
-2. **IDs**: Technical identifiers and keys  
-3. **OTHER DATA**: Emails, phones, metadata
+    EXTRACTION PRIORITIES (in order):
+    1. **NAMES/TITLES**: Any human-readable names, titles, labels, subjects
+    2. **IDs**: Technical identifiers and keys  
+    3. **OTHER DATA**: Emails, phones, metadata
 
-SPECIFIC PATTERNS TO FIND:
-- Resource names: "title", "name", "subject", "summary", "label", "displayName"
-- Event names: event titles, meeting subjects, calendar item names
-- Document names: file names, document titles, spreadsheet names
-- User names: creator names, owner names, participant names
-- IDs: Any alphanumeric identifiers (10+ chars)
+    SPECIFIC PATTERNS TO FIND:
+    - Resource names: "title", "name", "subject", "summary", "label", "displayName"
+    - Event names: event titles, meeting subjects, calendar item names
+    - Document names: file names, document titles, spreadsheet names
+    - User names: creator names, owner names, participant names
+    - IDs: Any alphanumeric identifiers (10+ chars)
 
-NAMING CONVENTIONS:
-- If extracting event data: use "eventName", "eventId" 
-- If extracting document data: use "documentName", "documentId"
-- If extracting file data: use "fileName", "fileId"
-- If extracting calendar data: use "calendarName", "calendarId"
-- If extracting spreadsheet data: use "spreadsheetName", "spreadsheetId"
+    NAMING CONVENTIONS:
+    - If extracting event data: use "eventName", "eventId" 
+    - If extracting document data: use "documentName", "documentId"
+    - If extracting file data: use "fileName", "fileId"
+    - If extracting calendar data: use "calendarName", "calendarId"
+    - If extracting spreadsheet data: use "spreadsheetName", "spreadsheetId"
 
-Be thorough but accurate.`;
+    Be thorough but accurate.`;
 
     const userPrompt = `Extract ALL meaningful data from this output. Focus on finding:
 
@@ -503,7 +503,13 @@ Be thorough but accurate.`;
     ${outputText}
 
     Look for names in fields like: title, name, subject, summary, displayName, label, etc.
-    Extract IDs from fields like: id, eventId, documentId, fileId, etc.`;
+    Extract IDs from fields like: id, eventId, documentId, fileId, etc.
+    
+    IMPORTANT: If you see JSON with a "title" field, extract it as documentName/spreadsheetName/etc based on context.
+    If you see "name" fields, extract them with appropriate keys.
+    Extract ANY email addresses you find into the emails array.
+    Extract ANY phone numbers you find into the phones array.
+    Put any other useful data (dates, status, type, etc.) into metadata.`;
 
     try {
       const { object: extractedData } = await generateObject({
@@ -532,12 +538,12 @@ Be thorough but accurate.`;
     
     const idPatterns = [
       /(?:document\s*)?ID(?:\s*is)?:\s*["']?([a-zA-Z0-9_-]{10,})["']?/gi,
-      /"(?:id|documentId|spreadsheetId|fileId)"\s*:\s*"([^"]+)"/gi,
+      /"(?:id|documentId|spreadsheetId|fileId|eventId|calendarId)"\s*:\s*"([^"]+)"/gi,
     ];
     
     const namePatterns = [
-      /(?:title|name)(?:\s*is)?:\s*["']([^"']+)["']/gi,
-      /"(?:title|name|label)"\s*:\s*"([^"]+)"/gi,
+      /(?:title|name|label|subject|displayName)(?:\s*is)?:\s*["']([^"']+)["']/gi,
+      /"(?:title|name|label|subject|displayName|documentName|spreadsheetName|fileName)"\s*:\s*"([^"]+)"/gi,
     ];
     
     for (const pattern of idPatterns) {
@@ -549,6 +555,10 @@ Be thorough but accurate.`;
             ids.documentId = id;
           } else if (text.toLowerCase().includes('spreadsheet')) {
             ids.spreadsheetId = id;
+          } else if (text.toLowerCase().includes('event')) {
+            ids.eventId = id;
+          } else if (text.toLowerCase().includes('calendar')) {
+            ids.calendarId = id;
           } else {
             ids.id = id;
           }
@@ -560,11 +570,15 @@ Be thorough but accurate.`;
       let match;
       while ((match = pattern.exec(text)) !== null) {
         const name = match[1];
-        if (name) {
+        if (name && name.trim()) {
           if (text.toLowerCase().includes('document')) {
             names.documentName = name;
           } else if (text.toLowerCase().includes('spreadsheet')) {
             names.spreadsheetName = name;
+          } else if (text.toLowerCase().includes('event')) {
+            names.eventName = name;
+          } else if (text.toLowerCase().includes('file')) {
+            names.fileName = name;
           } else {
             names.name = name;
           }
