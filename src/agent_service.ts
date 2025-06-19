@@ -470,32 +470,40 @@ ${outputText || "No text output."}
       anthropic("claude-sonnet-4-20250514") : 
       modelToUse === 'gpt-4o' ? openai("gpt-4o") : openai("gpt-4.1");
 
-    const systemPrompt = `You are a highly precise data extraction engine. Extract ALL structured data from the AI agent's output.
+    const systemPrompt = `You are a comprehensive data extraction engine. Extract ALL meaningful data from API responses.
 
-EXTRACTION RULES:
-1. **IDs**: Look for any ID mentions (documentId, fileId, etc.)
-2. **Names**: Extract resource names, titles, or labels
-3. **Emails**: Find any email addresses mentioned
-4. **Phones**: Find any phone numbers
-5. **Metadata**: Extract any other structured data
+EXTRACTION PRIORITIES (in order):
+1. **NAMES/TITLES**: Any human-readable names, titles, labels, subjects
+2. **IDs**: Technical identifiers and keys  
+3. **OTHER DATA**: Emails, phones, metadata
 
-ID PATTERNS:
-- After "ID:", "id:", "ID is", "with ID"
-- Inside quotes after ID-related words
-- Long alphanumeric strings (10+ characters)
+SPECIFIC PATTERNS TO FIND:
+- Resource names: "title", "name", "subject", "summary", "label", "displayName"
+- Event names: event titles, meeting subjects, calendar item names
+- Document names: file names, document titles, spreadsheet names
+- User names: creator names, owner names, participant names
+- IDs: Any alphanumeric identifiers (10+ chars)
 
-NAME PATTERNS:
-- After "title:", "name:", "label:"
-- Document/file/resource names
-- Any user-friendly identifiers
+NAMING CONVENTIONS:
+- If extracting event data: use "eventName", "eventId" 
+- If extracting document data: use "documentName", "documentId"
+- If extracting file data: use "fileName", "fileId"
+- If extracting calendar data: use "calendarName", "calendarId"
+- If extracting spreadsheet data: use "spreadsheetName", "spreadsheetId"
 
 Be thorough but accurate.`;
 
-    const userPrompt = `Extract ALL data from this output:
+    const userPrompt = `Extract ALL meaningful data from this output. Focus on finding:
 
-${outputText}
+    1. NAMES/TITLES (highest priority): Any human-readable identifiers
+    2. IDs: Technical identifiers  
+    3. OTHER: Emails, phones, metadata
 
-Look for IDs, names, emails, phones, and any structured data.`;
+    Response to analyze:
+    ${outputText}
+
+    Look for names in fields like: title, name, subject, summary, displayName, label, etc.
+    Extract IDs from fields like: id, eventId, documentId, fileId, etc.`;
 
     try {
       const { object: extractedData } = await generateObject({

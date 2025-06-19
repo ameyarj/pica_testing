@@ -179,28 +179,47 @@ private async buildSummaryContent(): Promise<string> {
         summary += `- No model usage was recorded in memory.\n`
     }
 
-    summary += `\n## Actions Summary (from log file)\n\n`;
-    const platforms = new Map<string, { success: number; failed: number }>();
-    for (const entry of logData.entries) {
-      const key = entry.platform;
-      const current = platforms.get(key) || { success: 0, failed: 0 };
-      if (entry.response.success) {
-        current.success++;
-      } else {
-        current.failed++;
-      }
-      platforms.set(key, current);
-    }
-    
-    for (const [platform, stats] of platforms.entries()) {
-      const total = stats.success + stats.failed;
-      const rate = total > 0 ? ((stats.success / total) * 100).toFixed(1) : '0.0';
-      summary += `### ${platform}\n`;
-      summary += `- **Total Logged:** ${total}\n`;
-      summary += `- **Success:** ${stats.success}\n`;
-      summary += `- **Failed:** ${stats.failed}\n`;
-      summary += `- **Success Rate:** ${rate}%\n\n`;
-    }
+    summary += `\n## Actions Summary \n\n`;
+    const actionResults = new Map<string, { success: boolean; attempts: number }>();
+for (const entry of entries) {
+  const actionKey = `${entry.platform}:${entry.actionId}`;
+  const existing = actionResults.get(actionKey);
+  
+  if (!existing) {
+    actionResults.set(actionKey, {
+      success: entry.response.success,
+      attempts: 1
+    });
+  } else {
+    existing.success = existing.success || entry.response.success;
+    existing.attempts++;
+  }
+}
+
+const platforms = new Map<string, { success: number; failed: number; totalAttempts: number }>();
+for (const [actionKey, result] of actionResults.entries()) {
+  const platform = actionKey.split(':')[0];
+  const current = platforms.get(platform) || { success: 0, failed: 0, totalAttempts: 0 };
+  
+  if (result.success) {
+    current.success++;
+  } else {
+    current.failed++;
+  }
+  current.totalAttempts += result.attempts;
+  platforms.set(platform, current);
+}
+
+for (const [platform, stats] of platforms.entries()) {
+  const total = stats.success + stats.failed;
+  const rate = total > 0 ? ((stats.success / total) * 100).toFixed(1) : '0.0';
+  summary += `### ${platform}\n`;
+  summary += `- **Total Actions:** ${total}\n`;
+  summary += `- **Success:** ${stats.success}\n`;
+  summary += `- **Failed:** ${stats.failed}\n`;
+  summary += `- **Success Rate:** ${rate}%\n`;
+  summary += `- **Total Attempts:** ${stats.totalAttempts}\n\n`;
+}
 
     fs.writeFileSync(summaryFile, summary);
     console.log(chalk.bold.green(`\n📊 Summary report generated: ${summaryFile}`));

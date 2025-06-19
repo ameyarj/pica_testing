@@ -285,13 +285,18 @@ private incorporateResponseRefinements(
   }
 
   private getContextualOpening(action: ModelDefinition, context: ExecutionContext): string {
-    const recentSuccess = context.recentActions.filter(a => a.success).slice(-1)[0];
-    if (recentSuccess) {
-      return `Following up on the ${recentSuccess.actionTitle}, now we need to ${action.actionName.toLowerCase()} the ${action.modelName.toLowerCase()}. `;
-    }
-    return `For our testing workflow, please ${action.actionName.toLowerCase()} a ${action.modelName.toLowerCase()} in ${action.connectionPlatform}. `;
+  const recentSuccess = context.recentActions.filter(a => a.success).slice(-1)[0];
+  
+  const hasRelevantNames = context.availableNames && context.availableNames.size > 0;
+  
+  if (recentSuccess && hasRelevantNames) {
+    const nameHint = Array.from(context.availableNames.values())[0];
+    return `Following up on the ${recentSuccess.actionTitle}, now we need to ${action.actionName.toLowerCase()} the ${action.modelName.toLowerCase()} named "${nameHint}". Use the name when possible, not technical IDs. `;
+  } else if (recentSuccess) {
+    return `Following up on the ${recentSuccess.actionTitle}, now we need to ${action.actionName.toLowerCase()} the ${action.modelName.toLowerCase()}. `;
   }
-
+  return `For our testing workflow, please ${action.actionName.toLowerCase()} a ${action.modelName.toLowerCase()} in ${action.connectionPlatform}. Use human-readable names when possible. `;
+}
   private buildContextSection(
   action: ModelDefinition, 
   context: ExecutionContext, 
@@ -301,15 +306,24 @@ private incorporateResponseRefinements(
   
   if (context.availableIds && context.availableIds.size > 0) {
     section += 'IDs from previous actions in this testing session:\n';
-    for (const [type, ids] of context.availableIds.entries()) {
-      const idList = Array.isArray(ids) ? ids : [ids];
-      section += `• ${type}: "${idList[0]}" - USE THIS DIRECTLY, it already exists\n`;
-      if (idList.length > 1) {
-        section += `  Additional ${type}s: ${idList.slice(1).map(id => `"${id}"`).join(', ')}\n`;
+    if (context.availableNames && context.availableNames.size > 0) {
+      section += 'Resource names (use these for user-friendly operations):\n';
+      for (const [idType, name] of context.availableNames.entries()) {
+        section += `• ${idType.replace('Id', 'Name')}: "${name}" - PREFER THIS for operations\n`;
       }
+      section += '\n';
     }
-    section += '\nThese resources were created in earlier actions. You should use these IDs directly without creating new ones.\n';
-  }
+
+    section += 'Technical IDs (use only if names don\'t work):\n';
+        for (const [type, ids] of context.availableIds.entries()) {
+          const idList = Array.isArray(ids) ? ids : [ids];
+          section += `• ${type}: "${idList[0]}" - USE THIS DIRECTLY, it already exists\n`;
+          if (idList.length > 1) {
+            section += `  Additional ${type}s: ${idList.slice(1).map(id => `"${id}"`).join(', ')}\n`;
+          }
+        }
+        section += '\nThese resources were created in earlier actions. You should use these IDs directly without creating new ones.\n';
+      }
   
   if (level === 'extensive') {
     if (context.createdResources && context.createdResources.size > 0) {

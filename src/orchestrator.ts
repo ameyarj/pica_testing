@@ -93,134 +93,143 @@ export class EnhancedPicaosTestingOrchestrator {
   }
 
   private async testPlatform(connection: ConnectionDefinition): Promise<void> {
-    let modelDefinitions = await this.picaApiService.getModelDefinitions(connection._id);
-    if (!modelDefinitions || modelDefinitions.length === 0) {
-      console.log(chalk.yellow(`No model definitions found for ${connection.name}.`));
-      return;
+  let modelDefinitions = await this.picaApiService.getModelDefinitions(connection._id);
+  if (!modelDefinitions || modelDefinitions.length === 0) {
+    console.log(chalk.yellow(`No model definitions found for ${connection.name}.`));
+    return;
+  }
+
+  modelDefinitions = modelDefinitions.filter(action => action.supported !== false);
+  console.log(chalk.bold(`\n📋 Found ${modelDefinitions.length} supported actions for ${connection.name}`));
+
+  console.log(chalk.bold(`\n📋 Found ${modelDefinitions.length} actions for ${connection.name}`));
+  if (!this.logger) {
+    this.logger = new ExecutionLogger(connection.name);
+    this.agentService.setLogger(this.logger);
+  }
+
+  this.contextManager.reset();
+
+  console.log(chalk.cyan("\n🧩 Analyzing action dependencies..."));
+  const dependencyGraph = await this.dependencyAnalyzer.analyzeDependencies(
+    modelDefinitions,
+    connection.name
+  );
+
+  const sortedActions = this.dependencyAnalyzer.getSortedActions(dependencyGraph, modelDefinitions);
+  this.displayExecutionPlan(sortedActions, dependencyGraph);
+
+  const results: EnhancedActionResult[] = [];
+  const failedActions: Array<{action: ModelDefinition, result: EnhancedActionResult, reason: string}> = [];
+
+  console.log(chalk.bold.inverse("\n\n🔄 PASS 1: Initial Execution with Dependency Order 🔄"));
+
+  for (const action of sortedActions) {
+    const actionMetadata = this.dependencyAnalyzer.getActionMetadata(action._id, dependencyGraph);
+
+    if (!action.knowledge || action.knowledge.trim() === "") {
+      console.log(chalk.gray(`\n⏭️ Skipping "${action.title}" - No knowledge provided.`));
+      results.push({
+        actionTitle: action.title,
+        modelName: action.modelName,
+        success: false,
+        error: "Skipped - No knowledge",
+        originalKnowledge: "",
+        attempts: 0,
+        passNumber: 1,
+        dependenciesMet: true
+      });
+      continue;
     }
 
-    modelDefinitions = modelDefinitions.filter(action => action.supported !== false);
-    console.log(chalk.bold(`\n📋 Found ${modelDefinitions.length} supported actions for ${connection.name}`));
-
-    console.log(chalk.bold(`\n📋 Found ${modelDefinitions.length} actions for ${connection.name}`));
-    if (!this.logger) {
-      this.logger = new ExecutionLogger(connection.name);
-      this.agentService.setLogger(this.logger);
+    console.log(chalk.bold.blue(`\n🎯 Testing: "${action.title}" (${action.modelName})`));
+    if (results.length > 0 && results.length % 5 === 0) {
+      this.logger.generateSummaryReportAsync().catch(err =>
+        console.error('Error generating intermediate summary:', err)
+      );
     }
+    if (actionMetadata) {
+      console.log(chalk.gray(`   Priority: ${actionMetadata.priority}, Optional: ${actionMetadata.isOptional}`));
+    }
+    const result = await this.executeActionWithSmartRetries(action, 1, dependencyGraph, this.maxRetriesPerAction);
+    results.push(result);
 
-    this.contextManager.reset();
+    this.contextManager.updateContext(action, result, result.extractedData);
 
-    console.log(chalk.cyan("\n🧩 Analyzing action dependencies..."));
-    const dependencyGraph = await this.dependencyAnalyzer.analyzeDependencies(
-      modelDefinitions,
-      connection.name
+    if (!result.success) {
+      if (result.isPermissionError) {
+        this.permissionFailedActions.add(action._id);
+        console.log(chalk.red(`   ⛔ Permission error - will not retry`));
+      } else {
+        failedActions.push({ action, result, reason: "execution_failed" });
+      }
+    }
+  }
+
+  if (failedActions.length > 0) {
+    const retryableFailures = failedActions.filter(
+      f => !this.permissionFailedActions.has(f.action._id)
     );
 
-    const sortedActions = this.dependencyAnalyzer.getSortedActions(dependencyGraph, modelDefinitions);
-    this.displayExecutionPlan(sortedActions, dependencyGraph);
+    if (retryableFailures.length > 0) {
+      console.log(chalk.bold.inverse(
+        `\n\n🔄 PASS 2: Retrying ${retryableFailures.length} Failed Actions` +
+        `${failedActions.length - retryableFailures.length > 0 ?
+          ` (${failedActions.length - retryableFailures.length} skipped due to permissions)` :
+          ''} 🔄`
+      ));
 
-    const results: EnhancedActionResult[] = [];
-    const failedActions: Array<{action: ModelDefinition, result: EnhancedActionResult, reason: string}> = [];
+      for (const { action, result: pass1Result } of retryableFailures) {
+        console.log(chalk.bold.yellow(`\n🔁 Retrying: "${action.title}"`));
+        console.log(chalk.gray(`   Previous failure: ${pass1Result.error}`));
 
-    console.log(chalk.bold.inverse("\n\n🔄 PASS 1: Initial Execution with Dependency Order 🔄"));
+        const knowledgeToUse = pass1Result.finalKnowledge || action.knowledge;
+        const enhancedAction = { ...action, knowledge: knowledgeToUse };
 
-    for (const action of sortedActions) {
-      const actionMetadata = this.dependencyAnalyzer.getActionMetadata(action._id, dependencyGraph);
-
-      if (!action.knowledge || action.knowledge.trim() === "") {
-        console.log(chalk.gray(`\n⏭️ Skipping "${action.title}" - No knowledge provided.`));
-        results.push({
-          actionTitle: action.title,
-          modelName: action.modelName,
-          success: false,
-          error: "Skipped - No knowledge",
-          originalKnowledge: "",
-          attempts: 0,
-          passNumber: 1,
-          dependenciesMet: true
-        });
-        continue;
-      }
-
-      console.log(chalk.bold.blue(`\n🎯 Testing: "${action.title}" (${action.modelName})`));
-      if (results.length > 0 && results.length % 5 === 0) {
-        this.logger.generateSummaryReportAsync().catch(err =>
-          console.error('Error generating intermediate summary:', err)
+        const pass2Result = await this.executeActionWithSmartRetries(
+          enhancedAction,
+          2,
+          dependencyGraph,
+          1,
+          pass1Result.error
         );
-      }
-      if (actionMetadata) {
-        console.log(chalk.gray(`   Priority: ${actionMetadata.priority}, Optional: ${actionMetadata.isOptional}`));
-      }
-      const result = await this.executeActionWithSmartRetries(action, 1, dependencyGraph,this.maxRetriesPerAction);
-      results.push(result);
 
-      this.contextManager.updateContext(action, result, result.extractedData);
+        const originalIndex = results.findIndex(r =>
+          r.actionTitle === action.title && r.modelName === action.modelName
+        );
+        if (originalIndex >= 0) {
+          results[originalIndex] = {
+            ...pass2Result,
+            attempts: pass1Result.attempts + pass2Result.attempts,
+            originalKnowledge: action.knowledge,
+            passNumber: 2
+          };
+        }
 
-      if (!result.success) {
-        if (result.isPermissionError) {
-          this.permissionFailedActions.add(action._id);
-          console.log(chalk.red(`   ⛔ Permission error - will not retry`));
-        } else {
-          failedActions.push({ action, result, reason: "execution_failed" });
+        if (pass2Result.success) {
+          this.contextManager.updateContext(enhancedAction, pass2Result, pass2Result.extractedData);
         }
       }
+    } else {
+      console.log(chalk.yellow.inverse("\n\n⚠️ All failures were due to permission errors - skipping Pass 2"));
     }
+  }
 
-    if (failedActions.length > 0) {
-      const retryableFailures = failedActions.filter(
-        f => !this.permissionFailedActions.has(f.action._id)
-      );
-
-      if (retryableFailures.length > 0) {
-        console.log(chalk.bold.inverse(
-          `\n\n🔄 PASS 2: Retrying ${retryableFailures.length} Failed Actions` +
-          `${failedActions.length - retryableFailures.length > 0 ?
-            ` (${failedActions.length - retryableFailures.length} skipped due to permissions)` :
-            ''} 🔄`
-        ));
-
-        for (const { action, result: pass1Result } of retryableFailures) {
-          console.log(chalk.bold.yellow(`\n🔁 Retrying: "${action.title}"`));
-          console.log(chalk.gray(`   Previous failure: ${pass1Result.error}`));
-
-          const knowledgeToUse = pass1Result.finalKnowledge || action.knowledge;
-          const enhancedAction = { ...action, knowledge: knowledgeToUse };
-
-          const pass2Result = await this.executeActionWithSmartRetries(
-            enhancedAction,
-            2,
-            dependencyGraph,
-            1,
-            pass1Result.error
-          );
-
-          const originalIndex = results.findIndex(r =>
-            r.actionTitle === action.title && r.modelName === action.modelName
-          );
-          if (originalIndex >= 0) {
-            results[originalIndex] = {
-              ...pass2Result,
-              attempts: pass1Result.attempts + pass2Result.attempts,
-              originalKnowledge: action.knowledge,
-              passNumber: 2
-            };
-          }
-
-          if (pass2Result.success) {
-            this.contextManager.updateContext(enhancedAction, pass2Result, pass2Result.extractedData);
-          }
-        }
-      } else {
-          console.log(chalk.yellow.inverse("\n\n⚠️ All failures were due to permission errors - skipping Pass 2"));
-      }
-    }
-
+  try {
     this.saveModifiedKnowledge(connection.name, results);
     this.displayEnhancedSummary(connection, results, dependencyGraph);
     if (this.logger) {
       this.logger.generateSummaryReport();
     }
+  } catch (error) {
+    console.error(chalk.red("💥 Error during platform testing:"), error);
+    this.displayEnhancedSummary(connection, results, dependencyGraph);
+    if (this.logger) {
+      this.logger.generateSummaryReport();
+    }
+    throw error;
   }
+}
 
 
   public handleInterrupt(): void {
@@ -274,8 +283,9 @@ export class EnhancedPicaosTestingOrchestrator {
   console.log(chalk.blue(`\n💾 Saving ${successfulModified.length} refined knowledge files...`));
   
   successfulModified.forEach(result => {
-    const actionId = result.actionId || 'unknown';
-    const filename = `${result.actionTitle.replace(/[^a-zA-Z0-9\s-]/g, '')} - ${actionId}.md`;
+    const actionTitle = result.actionTitle.replace(/[<>:"/\\|?*]/g, '_').replace(/\s+/g, '_');
+    const actionId = (result.actionId || 'unknown').replace(/[<>:"/\\|?*:]/g, '_');
+    const filename = `${actionTitle}_${actionId.substring(0, 20)}.md`;
     const filepath = path.join(knowledgeDir, filename);
     
     const content = `# ${result.actionTitle}\n\n## Model: ${result.modelName}\n\n## Knowledge\n\n${result.finalKnowledge}`;
@@ -283,6 +293,28 @@ export class EnhancedPicaosTestingOrchestrator {
     fs.writeFileSync(filepath, content);
     console.log(chalk.green(`   ✓ Saved: ${filename}`));
   });
+}
+
+private saveKnowledgeImmediately(action: ModelDefinition, refinedKnowledge: string): void {
+  try {
+    const platformName = action.connectionPlatform;
+    const knowledgeDir = path.join(process.cwd(), 'knowledge', platformName);
+    if (!fs.existsSync(knowledgeDir)) {
+      fs.mkdirSync(knowledgeDir, { recursive: true });
+    }
+    
+    const actionTitle = action.title.replace(/[<>:"/\\|?*]/g, '_').replace(/\s+/g, '_');
+    const actionId = action._id.replace(/[<>:"/\\|?*]/g, '_');
+    const filename = `${actionTitle}_${actionId.substring(0, 20)}.md`;
+    const filepath = path.join(knowledgeDir, filename);
+    const content = `# ${action.title}\n\n## Model: ${action.modelName}\n\n## Knowledge\n\n${refinedKnowledge}`;
+    
+    fs.writeFileSync(filepath, content);
+    console.log(chalk.gray(`   💾 Knowledge saved: ${filename}`));
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+    console.log(chalk.yellow(`   ⚠️ Failed to save knowledge: ${errorMessage}`));
+  }
 }
 
   private validateActionPath(
@@ -371,6 +403,9 @@ export class EnhancedPicaosTestingOrchestrator {
     
     if (agentResult.success) {
       console.log(chalk.green(`   ✅ SUCCESS: ${agentResult.analysisReason || "Completed"}`));
+      if (currentKnowledge !== action.knowledge) {
+      this.saveKnowledgeImmediately(action, currentKnowledge);
+      }
       this.promptGenerator.recordPromptResult(action._id, prompt, true);
       
       if (agentResult.extractedData) {
@@ -460,6 +495,7 @@ export class EnhancedPicaosTestingOrchestrator {
       if (refinement.knowledge && refinement.knowledge !== currentKnowledge) {
         this.displayKnowledgeDiff(currentKnowledge, refinement.knowledge);
         currentKnowledge = refinement.knowledge;
+        this.saveKnowledgeImmediately(action, currentKnowledge);
       }
     }
   }
