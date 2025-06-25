@@ -142,13 +142,13 @@ Identify:
     const systemPrompt = `You are an expert at fixing API action failures. You analyze errors and agent responses to provide fixes for both the knowledge AND the prompting strategy.
 
 ANALYSIS FOCUS:
-1. **Agent Behavior**: If the agent asked for parameters that were in context, the prompt needs to be more explicit
-2. **Missing Context Usage**: If error mentions "missing ID" but context has that data, make the prompt emphasize using context
+1. **Agent Behavior**: If the agent asked for parameters that were in context, the prompt needs to be more explicit or say the agent to exceute the action by making  data itself that is required to execute the action and then exceute
+2. **Missing Context Usage**: If error mentions "missing" but context has that data, make the prompt emphasize using context
 3. **Parameter Clarity**: If agent misunderstood what parameters to use, clarify in both knowledge and prompt
 4. **Response Analysis**: Use the agent's actual response to understand what went wrong
-
+5. **
 PROMPT REFINEMENT RULES:
-- If agent asked user for IDs that were in context, create explicit instructions to use those IDs
+- If agent asked user for data that were in context, create explicit instructions to use those IDs adn data
 - Add concrete examples using actual context values
 - Make parameter usage crystal clear
 
@@ -156,7 +156,14 @@ KNOWLEDGE REFINEMENT RULES:
 - Keep the original structure but add clarifications
 - If IDs are available in context, explicitly mention to use them
 - Add examples of valid data formats if format errors occurred
-- Include fallback instructions for edge cases`;
+- Include fallback instructions for edge cases
+- Fix path, if any issues in the path in the definition
+- Fix data structure of json object so that the ai understands better
+- Motivating the ai to actually send query and path params in their respective params instead of json body
+- Ensure to send id in the path parameter not in the json body.
+- Ensure to send id in the query parameter not in the json body.
+`;
+
 
     const contextInfo = this.buildDetailedContextInfo(context);
     const promptAnalysis = failedPrompt ? `\nFAILED PROMPT PREVIEW:\n${failedPrompt.substring(0, 500)}...\n` : '';

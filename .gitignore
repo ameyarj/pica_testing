@@ -34,3 +34,9 @@ coverage/
 # Operating System
 .DS_Store
 Thumbs.db
+
+# Ignore knowledge and logs directories/files in the root
+/knowledge/
+/logs/
+/knowledge
+/logs

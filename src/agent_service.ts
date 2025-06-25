@@ -118,14 +118,23 @@ You are an intelligent API testing agent that executes actions across diverse pl
 EXECUTION PRINCIPLES:
 - ALWAYS call the Pica tool to execute the action - never simulate or describe
 - Use available context data (IDs, resources) from previous actions automatically
+ When you encounter missing parameters, use reasonable defaults:
+  - For userId/userEmail: Use test values like "connectors@picaos.com" 
+  - For DateTime: Use current date/time in ISO format (e.g., new Date().toISOString())
+  - For names/titles: Generate realistic test data
 - If an ID is needed and available in context, use it immediately without asking
 - For create actions: generate realistic, human-like data appropriate to the platform
 - For update/delete actions: verify the target resource exists first, create mock data if needed
+- NEVER stop at planning or analysis - always proceed to execution
+
+CRITICAL RULE: You must ALWAYS make actual Pica tool call. Do not end your response without executing the action. Say Pica Onetool to write START and END at the beginning and end of its every response and you must verify this keyword is present in the response and then only start analzing for failure or success.
 
 CONTEXT UTILIZATION:
 - The "Available Data" JSON contains IDs and resources from previous successful actions
 - Map these contextual values to required parameters intelligently
 - Example: if action needs 'documentId' and context has documentId: "abc123", use "abc123"
+- If pica tool tells that to execute the action it needs some data, ask it to how to obtain tha data if not available in context
+- If you need to create a resource, use the "Create" action first, then use the created data in subsequent actions
 
 VERIFICATION PROTOCOL:
 - Before modifying/deleting: verify the target exists via a get/list operation
@@ -603,7 +612,8 @@ ${outputText || "No text output."}
         threadId: threadId || `test-${Date.now()}`,
         resourceId: `resource-${Date.now()}`
       });
-
+    console.log(chalk.gray('   ⏳ Waiting for Pica agent to complete...'));
+    await new Promise(resolve => setTimeout(resolve, 25000));
       const outputText = result.text || "";
       const toolResults = result.toolResults || [];
 
@@ -629,7 +639,7 @@ ${outputText || "No text output."}
             success: analysis.success,
             error: analysis.success ? undefined : analysis.reason,
             extractedData: extractedData as ExtractedDataEnhanced,
-            agentOutput: outputText.substring(0, 1000), // First 1000 chars
+            agentOutput: outputText.substring(0, 1000), 
             analysisReason: analysis.reason
           },
           tokens: {

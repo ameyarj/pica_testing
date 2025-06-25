@@ -65,7 +65,16 @@ export class EnhancedPromptGenerator {
   const actionName = action.actionName.toLowerCase();
   const hasContext = context.availableIds && context.availableIds.size > 0;
   const needsId = action.path.includes('{{');
-  
+
+  if (actionName.includes('create') && !hasContext) {
+    return {
+      tone: 'technical',
+      emphasis: ['generate all required data', 'use test values', 'execute immediately'],
+      examples: true,
+      contextLevel: 'minimal'
+    };
+  }
+
   if (needsId && hasContext) {
     return {
       tone: 'contextual',
@@ -74,7 +83,7 @@ export class EnhancedPromptGenerator {
       contextLevel: 'extensive'
     };
   }
-  
+
   if (attemptNumber === 1) {
     if (actionName.includes('create')) {
       return {
@@ -92,7 +101,7 @@ export class EnhancedPromptGenerator {
       };
     }
   }
-  
+
   if (previousError) {
     if (previousError && (previousError.includes('403') || previousError.includes('permission') || 
         previousError.includes('forbidden') || previousError.includes('scope'))) {
@@ -103,7 +112,7 @@ export class EnhancedPromptGenerator {
         contextLevel: 'minimal'
       };
     }
-    
+
     if (previousError.includes('missing') || previousError.includes('required')) {
       return {
         tone: 'step-by-step',
@@ -120,7 +129,7 @@ export class EnhancedPromptGenerator {
       };
     }
   }
-  
+
   return {
     tone: 'contextual',
     emphasis: ['complete the task', 'use available resources'],
@@ -138,10 +147,10 @@ export class EnhancedPromptGenerator {
   previousError?: string 
 ): Promise<string> {
   let prompt = '';
-  
+
   const metadata = dependencyGraph?.nodes.find((n: any) => n.id === action._id);
   const needsContext = metadata && metadata.requiresIds.length > 0;
-  
+
   if (needsContext && context.availableIds && context.availableIds.size > 0) {
     prompt = "**IMPORTANT CONTEXT FROM PREVIOUS ACTIONS:**\n";
     for (const reqId of metadata.requiresIds) {
@@ -161,37 +170,46 @@ export class EnhancedPromptGenerator {
     
     prompt += "\n";
   }
-  
-  switch (strategy.tone) {
-    case 'conversational':
-      prompt += this.getConversationalOpening(action, context);
-      break;
-    case 'step-by-step':
-      prompt += this.getStepByStepOpening(action, context);
-      break;
-    case 'technical':
-      prompt += this.getTechnicalOpening(action, context);
-      break;
-    case 'contextual':
-      prompt += this.getContextualOpening(action, context);
-      break;
+
+  const isCreateWithNoContext = action.actionName.toLowerCase().includes('create') && 
+    (!context.availableIds || context.availableIds.size === 0);
+
+  if (isCreateWithNoContext) {
+    prompt += `Create ${action.title} by generating all required data yourself. `;
+    prompt += `Use realistic test values - don't ask for any missing information. `;
+    prompt += `For example: userIds like "test-user-${Date.now()}", emails like "test@example.com", `;
+    prompt += `dates in ISO format like "${new Date().toISOString()}", etc.\n\n`;
+  } else {
+    switch (strategy.tone) {
+      case 'conversational':
+        prompt += this.getConversationalOpening(action, context);
+        break;
+      case 'step-by-step':
+        prompt += this.getStepByStepOpening(action, context);
+        break;
+      case 'technical':
+        prompt += this.getTechnicalOpening(action, context);
+        break;
+      case 'contextual':
+        prompt += this.getContextualOpening(action, context);
+        break;
+    }
   }
-  
+
   if (strategy.contextLevel !== 'minimal' && context.availableIds && context.availableIds.size > 0) {
     prompt += this.buildContextSection(action, context, strategy.contextLevel);
   }
-  
+
   if (strategy.emphasis.length > 0) {
     prompt += '\n\nKey points to remember:\n';
     strategy.emphasis.forEach(point => {
       prompt += `• ${point}\n`;
     });
   }
-  
+
   if (strategy.contextLevel !== 'minimal') {
-      prompt += this.buildPathSection(action, context);
-    }
-  
+    prompt += this.buildPathSection(action, context);
+  }
 
   if (strategy.examples && examples.length > 0) {
     prompt += '\n\nHere are some examples that worked well:\n';
@@ -199,7 +217,7 @@ export class EnhancedPromptGenerator {
       prompt += `• ${example}\n`;
     });
   }
-  
+
   if (dependencyGraph) {
     const metadata = dependencyGraph.nodes.find((n: any) => n.id === action._id);
     if (metadata && metadata.dependsOn.length > 0) {
@@ -215,10 +233,12 @@ export class EnhancedPromptGenerator {
       });
     }
   }
-  
+
   prompt += `\n\n---\n### Technical Details\n${action.knowledge}`;
   prompt += `\n\n### Execute Task\nUse Action ID: ${action._id} to complete this task.`;
-  
+  prompt += '\n\n🚨 IMPORTANT: You MUST execute this action now using the Pica tool. Do not stop at planning or analysis.';
+  prompt += '\nIf you need values like userId or dates, use reasonable test defaults or ask pica to give the data or tell pica to make and use the necessary data it requires to execute the action.';
+  prompt += '\nRemember: Every response must include at least one actual Pica tool execution attempt.';
   return prompt;
 }
 
