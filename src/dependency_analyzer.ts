@@ -3,6 +3,7 @@ import { openai } from "@ai-sdk/openai";
 import { anthropic } from "@ai-sdk/anthropic";
 import { generateObject, LanguageModel } from "ai";
 import { EnhancedModelSelector } from './enhanced_model_selector';
+import { ApiDocAnalyzer } from './api_doc_analyzer';
 import { z } from 'zod';
 import chalk from 'chalk';
 
@@ -38,6 +39,7 @@ type DependencyGraph = z.infer<typeof DependencyGraphSchema>;
 
 export class EnhancedDependencyAnalyzer {
   private analysisModel: LanguageModel;
+  private apiDocAnalyzer: ApiDocAnalyzer;
   
   constructor(private useClaudeForAnalysis: boolean = true) {
   if (useClaudeForAnalysis && process.env.ANTHROPIC_API_KEY) {
@@ -50,12 +52,21 @@ export class EnhancedDependencyAnalyzer {
   } else {
     this.analysisModel = openai("gpt-4.1");
   }
+  
+  this.apiDocAnalyzer = new ApiDocAnalyzer();
 }
 
   async analyzeDependencies(
   actions: ModelDefinition[],
-  platformName: string
+  platformName: string,
+  useApiDocs: boolean = false
 ): Promise<DependencyGraph> {
+  // Optionally enhance actions with API documentation
+  if (useApiDocs && process.env.OPENAI_API_KEY) {
+    console.log(chalk.blue(`📚 Enhancing dependency analysis with API documentation...`));
+    await this.enhanceActionsWithApiDocs(actions.slice(0, 5), platformName); // Limit to first 5 for cost
+  }
+  
   const CHUNK_SIZE = 15; 
   
   if (actions.length <= CHUNK_SIZE) {
@@ -70,6 +81,31 @@ export class EnhancedDependencyAnalyzer {
   const mergedGraph = this.mergeChunkResults(chunkResults, actions);
   
   return this.resolveCrossChunkDependencies(mergedGraph, actions);
+}
+
+private async enhanceActionsWithApiDocs(
+  actions: ModelDefinition[],
+  platformName: string
+): Promise<void> {
+  for (const action of actions) {
+    try {
+      const apiDoc = await this.apiDocAnalyzer.searchApiDocumentation(action, platformName);
+      
+      if (apiDoc) {
+        // Enhance the action's knowledge with API documentation
+        const enhancedKnowledge = await this.apiDocAnalyzer.enhanceActionKnowledge(action, apiDoc);
+        action.knowledge = enhancedKnowledge;
+        
+        // Use documentation to improve dependency inference
+        const requiredParams = this.apiDocAnalyzer.getRequiredParameters(apiDoc);
+        
+        // Store enhanced parameter info for better dependency analysis
+        (action as any)._enhancedParams = requiredParams;
+      }
+    } catch (error) {
+      console.log(chalk.yellow(`   ⚠️ Could not fetch API docs for ${action.title}`));
+    }
+  }
 }
 
 private chunkActions(actions: ModelDefinition[], chunkSize: number): ModelDefinition[][] {

@@ -95,35 +95,35 @@ export class EnhancedPicaosTestingOrchestrator {
   private async testPlatform(connection: ConnectionDefinition): Promise<void> {
   let modelDefinitions = await this.picaApiService.getModelDefinitions(connection._id);
 
-  if (connection.platform === 'linear' || connection.name.toLowerCase().includes('linear')) {
-  const allowedActionIds = [
-    'conn_mod_def::GEXH0_2vqCE::PjPdM71gRU6MXor2oQZuWA',
-    'conn_mod_def::GEXH6iJVdjM::HzCyryaXRMS5r-TESOVvtg',
-    'conn_mod_def::GEXH7cC6iFY::JuK97n3GTLq8zm1_a6IpOA',
-    'conn_mod_def::GEXHqNDyFEA::Pmcd_0jCSMaawjJ0PyJJHA',
-    'conn_mod_def::GEXHqS0o2Kc::rJ-MdLmCQV-JO4KibZPSIw',
-    'conn_mod_def::GEXHqoUwMxI::mu38zbabTaCcW68pAj1plQ',
-    'conn_mod_def::GEXHrSstTV0::07yKeja4QuKsh0N43KB3ug',
-    'conn_mod_def::GEXHsu6BskY::sauKAJTaRwOhcGIYC66WEw',
-    'conn_mod_def::GEXHte3S_MU::3uTAiAMWSBGCNiRiEesz4g',
-    'conn_mod_def::GEXHwMCJ7nI::-0-yeGa2RM-aIKJmBh_gJQ',
-    'conn_mod_def::GEXHwPJ3SOs::sMGxKhReQ-auJzOqXRS1Iw',
-    'conn_mod_def::GEXHyH72B8A::8wmcs0UTQn67xfTXXVAJ0g',
-    'conn_mod_def::GEXHyy1crls::oyRPMYjOR4ObS9mDmgEqAQ',
-    'conn_mod_def::GEXM0AcNYFk::kCVQN2QSSz-5gkO521CPUQ',
-    'conn_mod_def::GEXM4vm38XA::K-6L2uo5QCufPXhDhrnhLg'
-  ];
+//   if (connection.platform === 'linear' || connection.name.toLowerCase().includes('linear')) {
+//   const allowedActionIds = [
+//     'conn_mod_def::GEXH0_2vqCE::PjPdM71gRU6MXor2oQZuWA',
+//     'conn_mod_def::GEXH6iJVdjM::HzCyryaXRMS5r-TESOVvtg',
+//     'conn_mod_def::GEXH7cC6iFY::JuK97n3GTLq8zm1_a6IpOA',
+//     'conn_mod_def::GEXHqNDyFEA::Pmcd_0jCSMaawjJ0PyJJHA',
+//     'conn_mod_def::GEXHqS0o2Kc::rJ-MdLmCQV-JO4KibZPSIw',
+//     'conn_mod_def::GEXHqoUwMxI::mu38zbabTaCcW68pAj1plQ',
+//     'conn_mod_def::GEXHrSstTV0::07yKeja4QuKsh0N43KB3ug',
+//     'conn_mod_def::GEXHsu6BskY::sauKAJTaRwOhcGIYC66WEw',
+//     'conn_mod_def::GEXHte3S_MU::3uTAiAMWSBGCNiRiEesz4g',
+//     'conn_mod_def::GEXHwMCJ7nI::-0-yeGa2RM-aIKJmBh_gJQ',
+//     'conn_mod_def::GEXHwPJ3SOs::sMGxKhReQ-auJzOqXRS1Iw',
+//     'conn_mod_def::GEXHyH72B8A::8wmcs0UTQn67xfTXXVAJ0g',
+//     'conn_mod_def::GEXHyy1crls::oyRPMYjOR4ObS9mDmgEqAQ',
+//     'conn_mod_def::GEXM0AcNYFk::kCVQN2QSSz-5gkO521CPUQ',
+//     'conn_mod_def::GEXM4vm38XA::K-6L2uo5QCufPXhDhrnhLg'
+//   ];
   
-  modelDefinitions = modelDefinitions.filter(action => 
-    allowedActionIds.includes(action._id)
-  );
+//   modelDefinitions = modelDefinitions.filter(action => 
+//     allowedActionIds.includes(action._id)
+//   );
   
-  console.log(chalk.cyan(`\n🎯 Filtered to ${modelDefinitions.length} specific Linear actions for testing`));
-}
-  if (!modelDefinitions || modelDefinitions.length === 0) {
-    console.log(chalk.yellow(`No model definitions found for ${connection.name}.`));
-    return;
-  }
+//   console.log(chalk.cyan(`\n🎯 Filtered to ${modelDefinitions.length} specific Linear actions for testing`));
+// }
+//   if (!modelDefinitions || modelDefinitions.length === 0) {
+//     console.log(chalk.yellow(`No model definitions found for ${connection.name}.`));
+//     return;
+//   }
 
   modelDefinitions = modelDefinitions.filter(action => action.supported !== false);
   console.log(chalk.bold(`\n📋 Found ${modelDefinitions.length} supported actions for ${connection.name}`));
@@ -401,6 +401,8 @@ private saveKnowledgeImmediately(action: ModelDefinition, refinedKnowledge: stri
     }
   }
 
+  // No longer need separate conversation mode attempt - unified smart execution handles everything
+
   while (attempts < maxAttempts) {
     attempts++;
     console.log(chalk.blue(`   Attempt ${attempts}/${maxAttempts}...`));
@@ -417,9 +419,7 @@ private saveKnowledgeImmediately(action: ModelDefinition, refinedKnowledge: stri
     
     strategyUsed = strategy.tone;
     
-    // console.log(chalk.gray(`   Strategy: ${strategy.tone}, Context: ${strategy.contextLevel}`));
-    
-    const agentResult = await this.agentService.executeTask(prompt, undefined, action, attempts);
+    const agentResult = await this.agentService.executeSmartTask(prompt, undefined, action, context, attempts);
 
    
     if (!agentResult.success && (agentResult.output?.includes('403') || agentResult.error?.includes('403'))) {
@@ -482,6 +482,7 @@ private saveKnowledgeImmediately(action: ModelDefinition, refinedKnowledge: stri
     }
 
     lastError = agentResult.error || "Unknown error";
+    lastAgentResponse = agentResult.agentResponse;
     console.log(chalk.red(`   ❌ FAILED: ${agentResult.analysisReason || lastError}`));
 
     if (agentResult.isPermissionError) {

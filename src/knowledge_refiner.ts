@@ -139,18 +139,20 @@ Identify:
       responseAnalysis = await this.analyzeAgentResponse(agentResponse, actionDetails, context);
     }
 
-    const systemPrompt = `You are an expert at fixing API action failures. You analyze errors and agent responses to provide fixes for both the knowledge AND the prompting strategy.
+    const systemPrompt = `You are an expert at fixing API action failures. You analyze errors and agent responses to provide GENERIC fixes that work for any similar prompts.
 
 ANALYSIS FOCUS:
-1. **Agent Behavior**: If the agent asked for parameters that were in context, the prompt needs to be more explicit or say the agent to exceute the action by making  data itself that is required to execute the action and then exceute
+1. **Agent Behavior**: If the agent asked for parameters that were in context, the prompt needs to be more explicit
 2. **Missing Context Usage**: If error mentions "missing" but context has that data, make the prompt emphasize using context
 3. **Parameter Clarity**: If agent misunderstood what parameters to use, clarify in both knowledge and prompt
 4. **Response Analysis**: Use the agent's actual response to understand what went wrong
-5. **
+5. **Make Fixes Generic**: Fixes should work for any prompt, not just the specific one that failed
+
 PROMPT REFINEMENT RULES:
-- If agent asked user for data that were in context, create explicit instructions to use those IDs adn data
+- If agent asked user for data that were in context, create explicit instructions to use those IDs and data
 - Add concrete examples using actual context values
 - Make parameter usage crystal clear
+- Tell agent to retrieve required data from system if not in context
 
 KNOWLEDGE REFINEMENT RULES:
 - Keep the original structure but add clarifications
@@ -158,10 +160,14 @@ KNOWLEDGE REFINEMENT RULES:
 - Add examples of valid data formats if format errors occurred
 - Include fallback instructions for edge cases
 - Fix path, if any issues in the path in the definition
-- Fix data structure of json object so that the ai understands better
-- Motivating the ai to actually send query and path params in their respective params instead of json body
-- Ensure to send id in the path parameter not in the json body.
-- Ensure to send id in the query parameter not in the json body.
+- Fix data structure of json object so that the AI understands better
+- Motivate the AI to actually send query and path params in their respective params instead of json body
+- Ensure to send id in the path parameter not in the json body
+- Ensure to send id in the query parameter not in the json body
+- Add clear parameter placement instructions (path vs query vs body)
+- Include working examples of the API call structure
+- Make refinements generic enough to work with different prompts
+- Focus on structural clarity over specific error fixes
 `;
 
 

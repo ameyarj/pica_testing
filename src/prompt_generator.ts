@@ -15,6 +15,13 @@ export class EnhancedPromptGenerator {
   private llmModel: LanguageModel;
   private promptHistory: Map<string, { prompt: string; success: boolean }[]> = new Map();
 
+  // HTTP action verbs to filter out from titles
+  private readonly HTTP_ACTION_VERBS = [
+    'create', 'get', 'update', 'delete', 'patch', 'put', 'post',
+    'retrieve', 'list', 'fetch', 'remove', 'modify', 'add', 'insert',
+    'search', 'query', 'find', 'read', 'write', 'edit', 'replace'
+  ];
+
   constructor(private useClaudeForPrompting: boolean = true) {
   if (useClaudeForPrompting && process.env.ANTHROPIC_API_KEY) {
     try {
@@ -28,6 +35,60 @@ export class EnhancedPromptGenerator {
   }
 }
 
+  /**
+   * Extract the actual resource name from the action title
+   * Examples:
+   * - "Create New Time Schedule" -> "time schedule"
+   * - "Get Specific Project Relation" -> "project relation"
+   * - "Update User Profile" -> "user profile"
+   */
+  private extractResourceFromTitle(title: string): string {
+    // Convert to lowercase for processing
+    let resourceName = title.toLowerCase();
+    
+    // Remove leading HTTP action verbs
+    const words = resourceName.split(/\s+/);
+    if (words.length > 0 && this.HTTP_ACTION_VERBS.includes(words[0])) {
+      words.shift(); // Remove the first word if it's an HTTP verb
+    }
+    
+    // Also remove common modifiers
+    const modifiers = ['new', 'existing', 'specific', 'all', 'single', 'multiple'];
+    const filteredWords = words.filter(word => !modifiers.includes(word));
+    
+    // Rejoin the words
+    resourceName = filteredWords.join(' ').trim();
+    
+    // Handle special cases
+    if (resourceName === '' || resourceName === 'a' || resourceName === 'the') {
+      // Fallback to a generic resource name based on the original title
+      if (title.toLowerCase().includes('time')) return 'time schedule';
+      if (title.toLowerCase().includes('project')) return 'project';
+      if (title.toLowerCase().includes('user')) return 'user';
+      if (title.toLowerCase().includes('issue')) return 'issue';
+      if (title.toLowerCase().includes('task')) return 'task';
+      return 'resource';
+    }
+    
+    return resourceName;
+  }
+
+  /**
+   * Get a more natural action verb based on the action name
+   */
+  private getNaturalActionVerb(actionName: string): string {
+    const action = actionName.toLowerCase();
+    
+    if (action.includes('create') || action.includes('add')) return 'create';
+    if (action.includes('update') || action.includes('edit') || action.includes('modify')) return 'update';
+    if (action.includes('delete') || action.includes('remove')) return 'delete';
+    if (action.includes('get') || action.includes('retrieve') || action.includes('fetch')) return 'get';
+    if (action.includes('list') || action.includes('search')) return 'list';
+    if (action.includes('custom')) return 'execute';
+    
+    return action; // fallback to original
+  }
+
   async generateAdaptivePrompt(
   action: ModelDefinition,
   context: ExecutionContext,
@@ -35,14 +96,15 @@ export class EnhancedPromptGenerator {
   attemptNumber: number = 1,
   previousError?: string,
   dependencyGraph?: any,
-  previousResponse?: string 
+  previousResponse?: string,
+  useConversation: boolean = false 
 ): Promise<{ prompt: string; strategy: PromptStrategy }> {
   
-  const strategy = this.determinePromptStrategy(action, context, attemptNumber, previousError);
+  const strategy = this.determinePromptStrategy(action, context, attemptNumber, previousError, useConversation);
   
   const examples = this.getRelevantExamples(action, context);
   
-  let prompt = await this.buildPrompt(action, context, strategy, examples, dependencyGraph, previousError);
+  let prompt = await this.buildPrompt(action, context, strategy, examples, dependencyGraph, previousError, previousResponse);
   
   if (previousResponse) {
     prompt = this.incorporateResponseRefinements(prompt, action, context, previousResponse);
@@ -60,7 +122,8 @@ export class EnhancedPromptGenerator {
   action: ModelDefinition,
   context: ExecutionContext,
   attemptNumber: number,
-  previousError?: string
+  previousError?: string,
+  useConversation?: boolean
 ): PromptStrategy {
   const actionName = action.actionName.toLowerCase();
   const hasContext = context.availableIds && context.availableIds.size > 0;
@@ -144,7 +207,8 @@ export class EnhancedPromptGenerator {
   strategy: PromptStrategy,
   examples: string[],
   dependencyGraph?: any,
-  previousError?: string 
+  previousError?: string,
+  previousResponse?: string 
 ): Promise<string> {
   let prompt = '';
 
@@ -175,10 +239,13 @@ export class EnhancedPromptGenerator {
     (!context.availableIds || context.availableIds.size === 0);
 
   if (isCreateWithNoContext) {
-    prompt += `Create ${action.title} by generating all required data yourself. `;
-    prompt += `Use realistic test values - don't ask for any missing information. `;
-    prompt += `For example: userIds like "test-user-${Date.now()}", emails like "test@example.com", `;
-    prompt += `dates in ISO format like "${new Date().toISOString()}", etc.\n\n`;
+    const resourceName = this.extractResourceFromTitle(action.title);
+    prompt += `Create a ${resourceName}. `;
+    prompt += `IMPORTANT: If you need values like userId, emails, or other IDs:\n`;
+    prompt += `1. First try to retrieve them from the system (e.g., list existing users)\n`;
+    prompt += `2. If you can't retrieve them, ask Pica to help you obtain the data\n`;
+    prompt += `3. Only use test values as a last resort\n`;
+    prompt += `Remember: Real data from the system is always preferred over generated test data.\n\n`;
   } else {
     switch (strategy.tone) {
       case 'conversational':
@@ -236,9 +303,15 @@ export class EnhancedPromptGenerator {
 
   prompt += `\n\n---\n### Technical Details\n${action.knowledge}`;
   prompt += `\n\n### Execute Task\nUse Action ID: ${action._id} to complete this task.`;
-  prompt += '\n\n🚨 IMPORTANT: You MUST execute this action now using the Pica tool. Do not stop at planning or analysis.';
-  prompt += '\nIf you need values like userId or dates, use reasonable test defaults or ask pica to give the data or tell pica to make and use the necessary data it requires to execute the action.';
-  prompt += '\nRemember: Every response must include at least one actual Pica tool execution attempt.';
+  prompt += '\n\n🚨 IMPORTANT EXECUTION INSTRUCTIONS:';
+  prompt += '\n1. You MUST execute this action now using the Pica tool. Do not stop at planning or analysis.';
+  prompt += '\n2. If you need data (userId, emails, etc):';
+  prompt += '\n   - First: Ask Pica to retrieve it from the system (e.g., "get me a valid userId")';
+  prompt += '\n   - Second: If Pica suggests an action to get the data, say "yes" to proceed';
+  prompt += '\n   - Last resort: Use test values only if retrieval fails';
+  prompt += '\n3. If Pica asks "Would you like me to..." or suggests an approach, respond with "Yes"';
+  prompt += '\n4. Every response must include at least one actual Pica tool execution attempt.';
+  prompt += '\n\nREMEMBER: Real system data > Retrieved data > Generated test data';
   return prompt;
 }
 
@@ -282,41 +355,49 @@ private incorporateResponseRefinements(
 
   private getConversationalOpening(action: ModelDefinition, context: ExecutionContext): string {
     const platform = action.connectionPlatform.replace(/-/g, ' ');
-    const model = action.modelName.toLowerCase();
+    const resourceName = this.extractResourceFromTitle(action.title);
+    const actionVerb = this.getNaturalActionVerb(action.actionName);
     
     const openings = [
-      `Hey! I need your help to ${action.actionName.toLowerCase()} a ${model} in ${platform}. `,
-      `Hi there! Could you please ${action.actionName.toLowerCase()} a ${model} using ${platform}? `,
-      `Great! Now let's ${action.actionName.toLowerCase()} a ${model} in ${platform}. `
+      `Hey! I need your help to ${actionVerb} a ${resourceName} in ${platform}. `,
+      `Hi there! Could you please ${actionVerb} a ${resourceName} using ${platform}? `,
+      `Great! Now let's ${actionVerb} a ${resourceName} in ${platform}. `
     ];
     
     return openings[Math.floor(Math.random() * openings.length)];
   }
 
   private getStepByStepOpening(action: ModelDefinition, context: ExecutionContext): string {
-    return `Let's carefully ${action.actionName.toLowerCase()} a ${action.modelName.toLowerCase()} step by step:\n\n` +
+    const resourceName = this.extractResourceFromTitle(action.title);
+    const actionVerb = this.getNaturalActionVerb(action.actionName);
+    
+    return `Let's carefully ${actionVerb} a ${resourceName} step by step:\n\n` +
            `Step 1: Check if we have all required information\n` +
            `Step 2: Use the correct action with proper parameters\n` +
            `Step 3: Verify the operation completed successfully\n\n`;
   }
 
   private getTechnicalOpening(action: ModelDefinition, context: ExecutionContext): string {
-    return `Execute ${action.actionName.toUpperCase()} operation on ${action.modelName} via ${action.connectionPlatform}. `;
+    const resourceName = this.extractResourceFromTitle(action.title);
+    return `Execute ${action.actionName.toUpperCase()} operation on ${resourceName} via ${action.connectionPlatform}. `;
   }
 
   private getContextualOpening(action: ModelDefinition, context: ExecutionContext): string {
-  const recentSuccess = context.recentActions.filter(a => a.success).slice(-1)[0];
-  
-  const hasRelevantNames = context.availableNames && context.availableNames.size > 0;
-  
-  if (recentSuccess && hasRelevantNames) {
-    const nameHint = Array.from(context.availableNames.values())[0];
-    return `Following up on the ${recentSuccess.actionTitle}, now we need to ${action.actionName.toLowerCase()} the ${action.modelName.toLowerCase()} named "${nameHint}". Use the name when possible, not technical IDs. `;
-  } else if (recentSuccess) {
-    return `Following up on the ${recentSuccess.actionTitle}, now we need to ${action.actionName.toLowerCase()} the ${action.modelName.toLowerCase()}. `;
+    const resourceName = this.extractResourceFromTitle(action.title);
+    const actionVerb = this.getNaturalActionVerb(action.actionName);
+    const recentSuccess = context.recentActions.filter(a => a.success).slice(-1)[0];
+    
+    const hasRelevantNames = context.availableNames && context.availableNames.size > 0;
+    
+    if (recentSuccess && hasRelevantNames) {
+      const nameHint = Array.from(context.availableNames.values())[0];
+      return `Following up on the ${recentSuccess.actionTitle}, now we need to ${actionVerb} the ${resourceName} named "${nameHint}". Use the name when possible, not technical IDs. `;
+    } else if (recentSuccess) {
+      return `Following up on the ${recentSuccess.actionTitle}, now we need to ${actionVerb} the ${resourceName}. `;
+    }
+    return `For our testing workflow, please ${actionVerb} a ${resourceName} in ${action.connectionPlatform}. Use human-readable names when possible. `;
   }
-  return `For our testing workflow, please ${action.actionName.toLowerCase()} a ${action.modelName.toLowerCase()} in ${action.connectionPlatform}. Use human-readable names when possible. `;
-}
+
   private buildContextSection(
   action: ModelDefinition, 
   context: ExecutionContext, 
@@ -413,16 +494,24 @@ private buildPathSection(action: ModelDefinition, context: ExecutionContext): st
   private getRelevantExamples(action: ModelDefinition, context: ExecutionContext): string[] {
     const examples: string[] = [];
     const platform = action.connectionPlatform.toLowerCase();
-    const model = action.modelName.toLowerCase();
+    const resourceName = this.extractResourceFromTitle(action.title);
     const actionName = action.actionName.toLowerCase();
     
     if (actionName.includes('create')) {
-      if (platform.includes('google') && model.includes('doc')) {
+      if (platform.includes('google') && resourceName.includes('doc')) {
         examples.push('Title: "Q4 2024 Strategic Planning Document"');
       } else if (platform.includes('sheet') || platform.includes('excel')) {
         examples.push('Title: "Sales Analysis - December 2024"');
       } else if (platform.includes('email')) {
         examples.push('Subject: "Project Update - Testing Framework Progress"');
+      } else if (platform.includes('linear')) {
+        if (resourceName.includes('issue')) {
+          examples.push('Title: "Fix login authentication bug"');
+        } else if (resourceName.includes('project')) {
+          examples.push('Name: "Q1 2025 Product Roadmap"');
+        } else if (resourceName.includes('cycle')) {
+          examples.push('Name: "Sprint 23 - Authentication Improvements"');
+        }
       }
     } else if (actionName.includes('update')) {
       examples.push('Add today\'s date to show the update worked');

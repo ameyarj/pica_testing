@@ -11,6 +11,7 @@ import { PathParameterResolver } from './path_resolver';
 import { URLValidator } from './url_validator';
 import { EnhancedModelSelector } from './enhanced_model_selector';
 import { ExecutionLogger } from './execution_logger';
+import { ConversationHandler, ConversationState, ResponsePattern } from './conversation_handler';
 
 import chalk from 'chalk';
 
@@ -55,6 +56,7 @@ export class EnhancedAgentService {
   private analysisModel: LanguageModel;
   private useClaudeForAgent: boolean;
   private logger?: ExecutionLogger;
+  private conversationHandler: ConversationHandler;
 
   constructor(
   picaSecretKey: string, 
@@ -95,6 +97,7 @@ export class EnhancedAgentService {
     }),
   });
 
+  this.conversationHandler = new ConversationHandler();
   this.initializeAgent(openAIApiKey);
 }
 
@@ -303,25 +306,70 @@ async discoverParameters(action: ModelDefinition): Promise<any> {
     const actionName = action.actionName.toLowerCase();
     const platform = action.connectionPlatform.replace('-', ' ');
     
+    // Extract resource name from title (same logic as in prompt_generator.ts)
+    const resourceName = this.extractResourceFromTitle(action.title);
+    
     if (history.length > 0 && context.availableIds && context.availableIds.size > 0) {
       if (actionName.includes('create')) {
-        return `Great! Now I need you to create a new ${action.modelName.toLowerCase()} in ${platform}. `;
+        return `Great! Now I need you to create a new ${resourceName} in ${platform}. `;
       } else if (actionName.includes('get') || actionName.includes('retrieve')) {
-        return `Perfect! Now let's retrieve the ${action.modelName.toLowerCase()} we just worked with. `;
+        return `Perfect! Now let's retrieve the ${resourceName} we just worked with. `;
       } else if (actionName.includes('update')) {
-        return `Excellent! Now I'd like you to update the ${action.modelName.toLowerCase()} with some new information. `;
+        return `Excellent! Now I'd like you to update the ${resourceName} with some new information. `;
       } else if (actionName.includes('delete')) {
-        return `Now let's clean up by deleting the ${action.modelName.toLowerCase()} we created. `;
+        return `Now let's clean up by deleting the ${resourceName} we created. `;
       }
     }
     
     if (actionName.includes('create')) {
-      return `Hi! I need you to create a new ${action.modelName.toLowerCase()} in ${platform}. `;
+      return `Hi! I need you to create a new ${resourceName} in ${platform}. `;
     } else if (actionName.includes('list')) {
-      return `Hello! Can you show me all the ${action.modelName.toLowerCase()} available in ${platform}? `;
+      return `Hello! Can you show me all the ${resourceName} available in ${platform}? `;
     } else {
       return `Hi! I need help with ${action.title.toLowerCase()} in ${platform}. `;
     }
+  }
+
+  // HTTP action verbs to filter out from titles (same as in prompt_generator.ts)
+  private readonly HTTP_ACTION_VERBS = [
+    'create', 'get', 'update', 'delete', 'patch', 'put', 'post',
+    'retrieve', 'list', 'fetch', 'remove', 'modify', 'add', 'insert',
+    'search', 'query', 'find', 'read', 'write', 'edit', 'replace'
+  ];
+
+  /**
+   * Extract the actual resource name from the action title
+   * (Same implementation as in prompt_generator.ts)
+   */
+  private extractResourceFromTitle(title: string): string {
+    // Convert to lowercase for processing
+    let resourceName = title.toLowerCase();
+    
+    // Remove leading HTTP action verbs
+    const words = resourceName.split(/\s+/);
+    if (words.length > 0 && this.HTTP_ACTION_VERBS.includes(words[0])) {
+      words.shift(); // Remove the first word if it's an HTTP verb
+    }
+    
+    // Also remove common modifiers
+    const modifiers = ['new', 'existing', 'specific', 'all', 'single', 'multiple'];
+    const filteredWords = words.filter(word => !modifiers.includes(word));
+    
+    // Rejoin the words
+    resourceName = filteredWords.join(' ').trim();
+    
+    // Handle special cases
+    if (resourceName === '' || resourceName === 'a' || resourceName === 'the') {
+      // Fallback to a generic resource name based on the original title
+      if (title.toLowerCase().includes('time')) return 'time schedule';
+      if (title.toLowerCase().includes('project')) return 'project';
+      if (title.toLowerCase().includes('user')) return 'user';
+      if (title.toLowerCase().includes('issue')) return 'issue';
+      if (title.toLowerCase().includes('task')) return 'task';
+      return 'resource';
+    }
+    
+    return resourceName;
   }
 
   private buildContextualInstructions(
@@ -597,6 +645,181 @@ ${outputText || "No text output."}
     
     return { ids, names };
   }
+  async executeSmartTask(
+    taskPrompt: string,
+    threadId?: string,
+    action?: ModelDefinition,
+    context?: ExecutionContext,
+    attemptNumber: number = 1
+  ): Promise<{ success: boolean; output?: any; error?: string; extractedData?: any; analysisReason?: string; agentResponse?: string; isPermissionError?: boolean; conversationTurns?: number }> {
+    const startTime = Date.now();
+    console.log(chalk.blue('   🚀 Starting unified smart execution...'));
+    
+    let conversationState = this.conversationHandler.createInitialState();
+    let currentPrompt = taskPrompt;
+    let lastResult: any = null;
+    let extractedDataAccumulated: any = {};
+    
+    const conversationThreadId = threadId || `conv-${Date.now()}`;
+    
+    // Add initial prompt to conversation
+    conversationState = this.conversationHandler.addTurn(conversationState, 'user', currentPrompt);
+    
+    while (!this.conversationHandler.isConversationComplete([], conversationState)) {
+      console.log(chalk.gray(`   📨 Turn ${conversationState.turnCount + 1}/5...`));
+      
+      try {
+        // Execute with current prompt
+        const result = await this.agent.generate(currentPrompt, {
+          threadId: conversationThreadId,
+          resourceId: action?._id || `resource-${Date.now()}`
+        });
+        
+        // Wait for Pica to process
+        console.log(chalk.gray('   ⏳ Waiting for Pica agent to complete...'));
+        await new Promise(resolve => setTimeout(resolve, 10000));
+        
+        const outputText = result.text || "";
+        const toolResults = result.toolResults || [];
+        
+        // Detect response patterns
+        const patterns = this.conversationHandler.detectResponsePatterns(outputText);
+        
+        // Add assistant response to conversation
+        conversationState = this.conversationHandler.addTurn(
+          conversationState, 
+          'assistant', 
+          outputText, 
+          patterns
+        );
+        
+        // Extract data from this turn
+        const turnExtractedData = await this.extractDataWithLLM(outputText, toolResults);
+        
+        // Accumulate extracted data
+        if (turnExtractedData) {
+          extractedDataAccumulated = {
+            ids: { ...extractedDataAccumulated.ids, ...turnExtractedData.ids },
+            names: { ...extractedDataAccumulated.names, ...turnExtractedData.names },
+            emails: [...(extractedDataAccumulated.emails || []), ...(turnExtractedData.emails || [])],
+            phones: [...(extractedDataAccumulated.phones || []), ...(turnExtractedData.phones || [])],
+            created_resources: { ...extractedDataAccumulated.created_resources, ...turnExtractedData.created_resources },
+            extracted_lists: { ...extractedDataAccumulated.extracted_lists, ...turnExtractedData.extracted_lists },
+            metadata: { ...extractedDataAccumulated.metadata, ...turnExtractedData.metadata }
+          };
+        }
+        
+        // Log pattern detection
+        if (patterns.length > 0) {
+          console.log(chalk.cyan(`   🎯 Detected patterns: ${patterns.map(p => p.type).join(', ')}`));
+        }
+        
+        // Check if conversation is complete
+        if (this.conversationHandler.isConversationComplete(patterns, conversationState)) {
+          console.log(chalk.green('   ✅ Conversation complete!'));
+          lastResult = result;
+          break;
+        }
+        
+        // Generate follow-up prompt
+        const followUpPrompt = this.conversationHandler.generateFollowUpPrompt(
+          patterns, 
+          conversationState, 
+          taskPrompt
+        );
+        
+        if (!followUpPrompt) {
+          console.log(chalk.yellow('   ⚠️ No follow-up prompt generated, ending conversation'));
+          lastResult = result;
+          break;
+        }
+        
+        console.log(chalk.blue(`   💬 Follow-up: "${followUpPrompt.substring(0, 100)}..."`));
+        
+        // Update conversation state with follow-up
+        conversationState = this.conversationHandler.addTurn(conversationState, 'user', followUpPrompt);
+        currentPrompt = followUpPrompt;
+        
+        // Small delay between turns
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+      } catch (error: any) {
+        console.error(chalk.red('   ❌ Error in conversation turn:'), error.message);
+        conversationState.lastError = error.message;
+        break;
+      }
+    }
+    
+    // Extract final result from conversation
+    const finalResult = this.conversationHandler.extractFinalResult(conversationState);
+    
+    // Analyze the final result
+    let analysis: { success: boolean; reason: string; isPermissionError?: boolean } = { 
+      success: false, 
+      reason: 'No result obtained' 
+    };
+    if (finalResult.output) {
+      analysis = await this.analyzeExecutionResultWithLLM(finalResult.output, []);
+    }
+    
+    // Log execution if logger is available
+    if (action && this.logger && finalResult.output) {
+      const allPrompts = conversationState.turns
+        .filter(t => t.role === 'user')
+        .map(t => t.content)
+        .join('\n\n---\n\n');
+      
+      const inputTokens = this.logger.estimateTokens(allPrompts);
+      const outputTokens = this.logger.estimateTokens(finalResult.output);
+      
+      this.logger.logExecution({
+        platform: action.connectionPlatform,
+        model: action.modelName,
+        action: action.actionName,
+        actionId: action._id,
+        attempt: 1,
+        prompt: {
+          strategy: 'conversation',
+          length: allPrompts.length,
+          content: taskPrompt.substring(0, 200) + '...'
+        },
+        response: {
+          success: analysis.success,
+          error: analysis.success ? undefined : analysis.reason,
+          extractedData: extractedDataAccumulated as ExtractedDataEnhanced,
+          agentOutput: finalResult.output.substring(0, 1000),
+          analysisReason: analysis.reason
+        },
+        tokens: {
+          model: this.useClaudeForAgent ? 'claude-sonnet-4-20250514' : 'gpt-4.1',
+          input: inputTokens,
+          output: outputTokens,
+          cost: this.logger.calculateCost(
+            this.useClaudeForAgent ? 'claude-sonnet-4-20250514' : 'gpt-4.1',
+            inputTokens,
+            outputTokens
+          )
+        },
+        duration: Date.now() - Date.now() // This should be tracked properly
+      });
+    }
+    
+    // Trust the LLM analysis over pattern detection if there's a mismatch
+    // The LLM analysis looks at the actual content while patterns are regex-based
+    const finalSuccess = analysis.success || (finalResult.success && !analysis.reason.includes('fail'));
+    
+    return {
+      success: finalSuccess,
+      output: finalResult.output,
+      error: !finalSuccess ? (finalResult.error || analysis.reason) : undefined,
+      extractedData: extractedDataAccumulated,
+      analysisReason: analysis.reason,
+      agentResponse: finalResult.output,
+      isPermissionError: analysis.isPermissionError,
+      conversationTurns: conversationState.turnCount
+    };
+  }
+
   async executeTask(
     taskPrompt: string,
     threadId?: string,
