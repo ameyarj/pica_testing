@@ -745,7 +745,7 @@ ${outputText || "No text output."}
         resourceId: `resource-${Date.now()}`
       });
     console.log(chalk.gray('   ⏳ Waiting for Pica agent to complete...'));
-    await new Promise(resolve => setTimeout(resolve, 25000));
+    await new Promise(resolve => setTimeout(resolve, 5000));
       const outputText = result.text || "";
       const toolResults = result.toolResults || [];
 
