@@ -3,6 +3,7 @@ import { generateText, generateObject } from "ai";
 import { z } from 'zod';
 import { ModelDefinition } from './interface';
 import chalk from 'chalk';
+import { tokenTracker } from './global_token_tracker';
 
 const ApiDocumentationSchema = z.object({
   parameters: z.array(z.object({
@@ -93,9 +94,7 @@ export class ApiDocAnalyzer {
 
   private async performSearch(query: string): Promise<string | null> {
     try {
-      const { text } = await generateText({
-        model: this.searchModel,
-        prompt: `Search for API documentation: ${query}. 
+      const prompt = `Search for API documentation: ${query}. 
         Focus on finding:
         1. Required and optional parameters
         2. Parameter types and locations (path, query, body)
@@ -103,9 +102,24 @@ export class ApiDocAnalyzer {
         4. Example requests and responses
         5. Any special constraints or formats
         
-        Return the most relevant API documentation information.`,
+        Return the most relevant API documentation information.`;
+      
+      const inputTokens = tokenTracker.estimateTokens(prompt);
+      
+      const { text } = await generateText({
+        model: this.searchModel,
+        prompt,
         maxTokens: 4000
       });
+      
+      const outputTokens = tokenTracker.estimateTokens(text);
+      tokenTracker.trackUsage(
+        'gpt-4o-search-preview',
+        inputTokens,
+        outputTokens,
+        'api-doc-analyzer',
+        'search-documentation'
+      );
 
       return text;
     } catch (error) {
@@ -147,12 +161,23 @@ ${searchResult}
 
 Extract all parameter information, examples, and requirements.`;
 
+      const inputTokens = tokenTracker.estimateTokens(systemPrompt + userPrompt);
+      
       const { object: documentation } = await generateObject({
         model: openai("gpt-4o"),
         schema: ApiDocumentationSchema,
         system: systemPrompt,
         prompt: userPrompt,
       });
+      
+      const outputTokens = tokenTracker.estimateTokens(JSON.stringify(documentation));
+      tokenTracker.trackUsage(
+        'gpt-4o',
+        inputTokens,
+        outputTokens,
+        'api-doc-analyzer',
+        'parse-documentation'
+      );
 
       return documentation;
     } catch (error) {

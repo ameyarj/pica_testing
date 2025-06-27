@@ -42,12 +42,8 @@ async function main() {
 
   } catch (error) {
     console.error(chalk.red.bold('\n💥 An unhandled error occurred during orchestration:'), error);
-  } finally {
-    console.log(chalk.blue('\nTest suite finished. Generating final summary...'));
-    if (orchestrator) {
-        orchestrator.handleInterrupt(); 
-    }
   }
+  // The orchestrator's start() method already handles summary generation in its finally block
 }
 
 process.on('unhandledRejection', (reason, promise) => {

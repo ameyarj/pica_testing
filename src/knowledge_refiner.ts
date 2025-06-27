@@ -4,6 +4,7 @@ import { generateText, generateObject, LanguageModel } from "ai";
 import { z } from 'zod';
 import { ModelDefinition, ExecutionContext } from './interface';
 import { EnhancedModelSelector } from './enhanced_model_selector';
+import { tokenTracker } from './global_token_tracker';
 
 const RefinementSchema = z.object({
   knowledge: z.string().nullable().describe("Updated knowledge text, or null if no changes needed"),
@@ -70,11 +71,22 @@ Identify:
 3. What specific values should have been used?`;
 
   try {
+    const inputTokens = tokenTracker.estimateTokens(systemPrompt + userPrompt);
+    
     const { text } = await generateText({
       model: this.llmModel,
       system: systemPrompt,
       prompt: userPrompt,
     });
+    
+    const outputTokens = tokenTracker.estimateTokens(text);
+    tokenTracker.trackUsage(
+      this.useClaudeForRefinement ? 'claude-sonnet-4-20250514' : 'gpt-4.1',
+      inputTokens,
+      outputTokens,
+      'knowledge-refiner',
+      'analyze-agent-response'
+    );
 
     const missingParams: string[] = [];
     const requestedFromUser: string[] = [];
@@ -210,12 +222,23 @@ Provide specific refinements to fix this error. Focus on making the prompt use c
       anthropic("claude-sonnet-4-20250514") : 
       openai(modelToUse);
 
+    const inputTokens = tokenTracker.estimateTokens(systemPrompt + userPrompt);
+    
     const { object: refinement } = await generateObject({
       model,
       schema: RefinementSchema,
       system: systemPrompt,
       prompt: userPrompt,
     });
+    
+    const outputTokens = tokenTracker.estimateTokens(JSON.stringify(refinement));
+    tokenTracker.trackUsage(
+      modelToUse,
+      inputTokens,
+      outputTokens,
+      'knowledge-refiner',
+      'refine-knowledge'
+    );
 
     let promptStrategy = refinement.promptStrategy;
     if (responseAnalysis && Object.keys(responseAnalysis.shouldHaveUsedFromContext).length > 0) {

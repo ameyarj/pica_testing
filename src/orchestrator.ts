@@ -12,6 +12,7 @@ import chalk from 'chalk';
 import * as diff from 'diff';
 import * as fs from 'fs';
 import * as path from 'path';
+import { tokenTracker } from './global_token_tracker';
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout
@@ -46,7 +47,8 @@ export class EnhancedPicaosTestingOrchestrator {
   }
 
   public async start(): Promise<void> {
-   
+    tokenTracker.reset();
+    
     try {
       const connections = await this.picaApiService.getAllConnectionDefinitions();
       if (!connections || connections.length === 0) {
@@ -64,6 +66,8 @@ export class EnhancedPicaosTestingOrchestrator {
     } catch (error) {
       console.error("\n💥 An unexpected error occurred in the orchestrator:", error);
     } finally {
+      tokenTracker.printSummary();
+      
       if (this.logger) {
         this.logger.generateSummaryReport();
       }

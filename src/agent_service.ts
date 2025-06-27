@@ -12,6 +12,7 @@ import { URLValidator } from './url_validator';
 import { EnhancedModelSelector } from './enhanced_model_selector';
 import { ExecutionLogger } from './execution_logger';
 import { ConversationHandler, ConversationState, ResponsePattern } from './conversation_handler';
+import { tokenTracker } from './global_token_tracker';
 
 import chalk from 'chalk';
 
@@ -401,11 +402,22 @@ ${outputText || "No text output."}
 \`\`\`
 `;
     try {
+      const inputTokens = tokenTracker.estimateTokens(systemPrompt + userPrompt);
+      
       let { text } = await generateText({
         model,
         system: systemPrompt,
         prompt: userPrompt,
       });
+      
+      const outputTokens = tokenTracker.estimateTokens(text);
+      tokenTracker.trackUsage(
+        modelToUse,
+        inputTokens,
+        outputTokens,
+        'agent-service',
+        'analyze-execution-result'
+      );
 
       const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
       if (jsonMatch && jsonMatch[1]) {
@@ -495,12 +507,23 @@ ${outputText || "No text output."}
     Put any other useful data (dates, status, type, etc.) into metadata.`;
 
     try {
+      const inputTokens = tokenTracker.estimateTokens(systemPrompt + userPrompt);
+      
       const { object: extractedData } = await generateObject({
         model,
         schema: ExtractedDataSchema,
         prompt: userPrompt,
         system: systemPrompt,
       });
+      
+      const outputTokens = tokenTracker.estimateTokens(JSON.stringify(extractedData));
+      tokenTracker.trackUsage(
+        modelToUse,
+        inputTokens,
+        outputTokens,
+        'agent-service',
+        'extract-data'
+      );
 
       if ((!extractedData.ids || Object.keys(extractedData.ids).length === 0) && outputText) {
         const manualData = this.manualExtraction(outputText);
