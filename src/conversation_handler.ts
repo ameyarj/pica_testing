@@ -24,7 +24,7 @@ export interface ResponsePattern {
 }
 
 export class ConversationHandler {
-  private readonly MAX_TURNS = 3; // Reduced from 5
+  private readonly MAX_TURNS = 3; 
   private readonly PATTERN_MATCHERS = {
     permission_request: [
       /would you like me to/i,
@@ -81,7 +81,6 @@ export class ConversationHandler {
     const patterns: ResponsePattern[] = [];
     const lowerResponse = response.toLowerCase();
 
-    // First check for concrete completion (highest priority)
     for (const pattern of this.PATTERN_MATCHERS.completed) {
       if (pattern.test(response)) {
         patterns.push({
@@ -90,18 +89,14 @@ export class ConversationHandler {
           details: 'Task completed with evidence',
           suggestedResponse: undefined
         });
-        // If we found completion, skip other patterns
         return patterns;
       }
     }
 
-    // Check if this is a real question (ends with ?)
     const hasQuestionMark = response.trim().endsWith('?');
     
-    // Check for progress update vs real question
     const isProgressUpdate = /(?:i'll|i'm|let me|now i|i will|going to|proceeding to)/i.test(response);
     
-    // Check for permission requests only if it's a real question
     if (hasQuestionMark && !isProgressUpdate) {
       for (const pattern of this.PATTERN_MATCHERS.permission_request) {
         if (pattern.test(response)) {
@@ -116,7 +111,6 @@ export class ConversationHandler {
       }
     }
 
-    // Check for data needed
     for (const pattern of this.PATTERN_MATCHERS.data_needed) {
       const match = pattern.exec(response);
       if (match) {
@@ -131,7 +125,6 @@ export class ConversationHandler {
       }
     }
 
-    // Check for suggestions - but only if it's not describing completed work
     const hasCompletionIndicators = /(?:successfully|created|updated|modified|changed|customized).*(?:project|resource|item)/i.test(response);
     if (!hasCompletionIndicators) {
       for (const pattern of this.PATTERN_MATCHERS.suggestion) {
@@ -147,7 +140,6 @@ export class ConversationHandler {
       }
     }
 
-    // Check for partial success
     for (const pattern of this.PATTERN_MATCHERS.partial_success) {
       if (pattern.test(response)) {
         patterns.push({
@@ -160,7 +152,6 @@ export class ConversationHandler {
       }
     }
 
-    // Check for errors
     for (const pattern of this.PATTERN_MATCHERS.error) {
       if (pattern.test(response)) {
         patterns.push({
@@ -172,7 +163,6 @@ export class ConversationHandler {
       }
     }
 
-    // Check for completion
     for (const pattern of this.PATTERN_MATCHERS.completed) {
       if (pattern.test(response)) {
         patterns.push({
@@ -184,7 +174,6 @@ export class ConversationHandler {
       }
     }
 
-    // If no patterns detected but response is short and questioning
     if (patterns.length === 0 && response.includes('?')) {
       patterns.push({
         type: 'permission_request',
@@ -202,13 +191,11 @@ export class ConversationHandler {
     conversationState: ConversationState,
     originalTask: string
   ): string | null {
-    // Check if we've exceeded max turns
     if (conversationState.turnCount >= this.MAX_TURNS) {
       console.log(`Reached maximum conversation turns (${this.MAX_TURNS})`);
       return null;
     }
 
-    // Find the highest confidence pattern
     const primaryPattern = patterns.reduce((prev, current) => 
       current.confidence > prev.confidence ? current : prev
     , patterns[0]);
@@ -217,7 +204,6 @@ export class ConversationHandler {
       return null;
     }
 
-    // Handle different pattern types
     switch (primaryPattern.type) {
       case 'permission_request':
         return primaryPattern.suggestedResponse || 'Yes, please proceed with that approach';
@@ -233,11 +219,9 @@ export class ConversationHandler {
         return primaryPattern.suggestedResponse || 'Great! Please continue with the remaining steps';
 
       case 'completed':
-        // Task is done, no follow-up needed
         return null;
 
       case 'error':
-        // For errors, we might want to retry with a different approach
         if (conversationState.turnCount < this.MAX_TURNS - 1) {
           return 'I see there was an error. Can you try a different approach or check if the required resources exist?';
         }
@@ -252,24 +236,20 @@ export class ConversationHandler {
     patterns: ResponsePattern[],
     conversationState: ConversationState
   ): boolean {
-    // Check if max turns reached
     if (conversationState.turnCount >= this.MAX_TURNS) {
       return true;
     }
 
-    // Check if task is explicitly completed
     const hasCompletedPattern = patterns.some(p => p.type === 'completed' && p.confidence > 0.8);
     if (hasCompletedPattern) {
       return true;
     }
 
-    // Check if we have a high-confidence error after multiple attempts
     const hasHighConfidenceError = patterns.some(p => p.type === 'error' && p.confidence > 0.8);
     if (hasHighConfidenceError && conversationState.turnCount >= 3) {
       return true;
     }
 
-    // Check for repetitive patterns (agent stuck in a loop)
     if (this.detectRepetitivePatterns(conversationState)) {
       return true;
     }
@@ -282,7 +262,6 @@ export class ConversationHandler {
       return false;
     }
 
-    // Check if the last two assistant responses are very similar
     const recentTurns = state.turns.filter(t => t.role === 'assistant').slice(-2);
     if (recentTurns.length === 2) {
       const similarity = this.calculateSimilarity(recentTurns[0].content, recentTurns[1].content);
@@ -296,7 +275,6 @@ export class ConversationHandler {
   }
 
   private calculateSimilarity(str1: string, str2: string): number {
-    // Simple similarity check based on common words
     const words1 = new Set(str1.toLowerCase().split(/\s+/));
     const words2 = new Set(str2.toLowerCase().split(/\s+/));
     
@@ -348,7 +326,6 @@ export class ConversationHandler {
     error?: string;
     extractedData?: any;
   } {
-    // Find the last assistant turn
     const lastAssistantTurn = [...state.turns]
       .reverse()
       .find(t => t.role === 'assistant');
@@ -360,7 +337,6 @@ export class ConversationHandler {
       };
     }
 
-    // Check if the last turn indicates success
     const patterns = lastAssistantTurn.patterns || [];
     const hasSuccess = patterns.some(p => 
       (p.type === 'completed' || p.type === 'partial_success') && p.confidence > 0.7

@@ -15,7 +15,6 @@ export class EnhancedPromptGenerator {
   private llmModel: LanguageModel;
   private promptHistory: Map<string, { prompt: string; success: boolean }[]> = new Map();
 
-  // HTTP action verbs to filter out from titles
   private readonly HTTP_ACTION_VERBS = [
     'create', 'get', 'update', 'delete', 'patch', 'put', 'post',
     'retrieve', 'list', 'fetch', 'remove', 'modify', 'add', 'insert',
@@ -35,33 +34,20 @@ export class EnhancedPromptGenerator {
   }
 }
 
-  /**
-   * Extract the actual resource name from the action title
-   * Examples:
-   * - "Create New Time Schedule" -> "time schedule"
-   * - "Get Specific Project Relation" -> "project relation"
-   * - "Update User Profile" -> "user profile"
-   */
   private extractResourceFromTitle(title: string): string {
-    // Convert to lowercase for processing
     let resourceName = title.toLowerCase();
     
-    // Remove leading HTTP action verbs
     const words = resourceName.split(/\s+/);
     if (words.length > 0 && this.HTTP_ACTION_VERBS.includes(words[0])) {
-      words.shift(); // Remove the first word if it's an HTTP verb
+      words.shift(); 
     }
     
-    // Also remove common modifiers
     const modifiers = ['new', 'existing', 'specific', 'all', 'single', 'multiple'];
     const filteredWords = words.filter(word => !modifiers.includes(word));
     
-    // Rejoin the words
     resourceName = filteredWords.join(' ').trim();
     
-    // Handle special cases
     if (resourceName === '' || resourceName === 'a' || resourceName === 'the') {
-      // Fallback to a generic resource name based on the original title
       if (title.toLowerCase().includes('time')) return 'time schedule';
       if (title.toLowerCase().includes('project')) return 'project';
       if (title.toLowerCase().includes('user')) return 'user';
@@ -73,9 +59,6 @@ export class EnhancedPromptGenerator {
     return resourceName;
   }
 
-  /**
-   * Get a more natural action verb based on the action name
-   */
   private getNaturalActionVerb(actionName: string): string {
     const action = actionName.toLowerCase();
     
@@ -86,7 +69,7 @@ export class EnhancedPromptGenerator {
     if (action.includes('list') || action.includes('search')) return 'list';
     if (action.includes('custom')) return 'execute';
     
-    return action; // fallback to original
+    return action; 
   }
 
   async generateAdaptivePrompt(

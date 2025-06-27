@@ -2,7 +2,6 @@ import { ModelDefinition } from './interface';
 import { openai } from "@ai-sdk/openai";
 import { anthropic } from "@ai-sdk/anthropic";
 import { generateObject, LanguageModel } from "ai";
-import { EnhancedModelSelector } from './enhanced_model_selector';
 import { ApiDocAnalyzer } from './api_doc_analyzer';
 import { z } from 'zod';
 import chalk from 'chalk';
@@ -61,10 +60,9 @@ export class EnhancedDependencyAnalyzer {
   platformName: string,
   useApiDocs: boolean = false
 ): Promise<DependencyGraph> {
-  // Optionally enhance actions with API documentation
   if (useApiDocs && process.env.OPENAI_API_KEY) {
     console.log(chalk.blue(`📚 Enhancing dependency analysis with API documentation...`));
-    await this.enhanceActionsWithApiDocs(actions.slice(0, 5), platformName); // Limit to first 5 for cost
+    await this.enhanceActionsWithApiDocs(actions.slice(0, 5), platformName); 
   }
   
   const CHUNK_SIZE = 15; 
@@ -92,14 +90,11 @@ private async enhanceActionsWithApiDocs(
       const apiDoc = await this.apiDocAnalyzer.searchApiDocumentation(action, platformName);
       
       if (apiDoc) {
-        // Enhance the action's knowledge with API documentation
         const enhancedKnowledge = await this.apiDocAnalyzer.enhanceActionKnowledge(action, apiDoc);
         action.knowledge = enhancedKnowledge;
         
-        // Use documentation to improve dependency inference
         const requiredParams = this.apiDocAnalyzer.getRequiredParameters(apiDoc);
         
-        // Store enhanced parameter info for better dependency analysis
         (action as any)._enhancedParams = requiredParams;
       }
     } catch (error) {
@@ -243,7 +238,6 @@ private async resolveCrossChunkDependencies(
   mergedGraph: DependencyGraph,
   allActions: ModelDefinition[]
 ): Promise<DependencyGraph> {
-  // Create provision map
   const provisionMap = new Map<string, string[]>();
   for (const node of mergedGraph.nodes) {
     for (const providedId of node.providesIds) {

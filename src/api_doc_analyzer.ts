@@ -42,7 +42,6 @@ export class ApiDocAnalyzer {
   ): Promise<ApiDocumentation | null> {
     const cacheKey = `${platform}:${action.actionName}:${action.modelName}`;
     
-    // Check cache first
     if (this.cache.has(cacheKey)) {
       console.log(chalk.gray(`   📚 Using cached API documentation for ${action.title}`));
       return this.cache.get(cacheKey)!;
@@ -51,10 +50,8 @@ export class ApiDocAnalyzer {
     try {
       console.log(chalk.blue(`   🔍 Searching API documentation for ${action.title}...`));
       
-      // Construct search query
       const searchQuery = this.buildSearchQuery(action, platform);
       
-      // Use GPT-4o Search to find relevant documentation
       const searchResult = await this.performSearch(searchQuery);
       
       if (!searchResult) {
@@ -62,10 +59,8 @@ export class ApiDocAnalyzer {
         return null;
       }
 
-      // Parse the documentation
       const documentation = await this.parseDocumentation(searchResult, action);
       
-      // Cache the result
       if (documentation) {
         this.cache.set(cacheKey, documentation);
         console.log(chalk.green(`   ✅ Found and cached API documentation`));
@@ -85,7 +80,6 @@ export class ApiDocAnalyzer {
       `${platform} ${action.action} ${action.path} API reference`
     ];
     
-    // For specific platforms, add platform-specific search terms
     if (platform.toLowerCase().includes('google')) {
       queries.push(`Google Workspace API ${action.modelName} ${action.actionName}`);
     } else if (platform.toLowerCase().includes('microsoft')) {
@@ -94,7 +88,7 @@ export class ApiDocAnalyzer {
       queries.push(`Linear GraphQL API ${action.modelName} ${action.actionName}`);
     }
     
-    return queries[0]; // Use the most specific query
+    return queries[0]; 
   }
 
   private async performSearch(query: string): Promise<string | null> {
@@ -170,7 +164,6 @@ Extract all parameter information, examples, and requirements.`;
   generateParameterSummary(documentation: ApiDocumentation): string {
     let summary = '';
     
-    // Group parameters by location
     const pathParams = documentation.parameters.filter(p => p.location === 'path');
     const queryParams = documentation.parameters.filter(p => p.location === 'query');
     const bodyParams = documentation.parameters.filter(p => p.location === 'body');
@@ -241,16 +234,13 @@ Extract all parameter information, examples, and requirements.`;
       body: {}
     };
     
-    // Fill in parameters with examples or context values
     documentation.parameters.forEach(param => {
       let value = param.example;
       
-      // Try to use context values if available
       if (context && context.availableIds && context.availableIds.has(param.name)) {
         value = context.availableIds.get(param.name)[0];
       }
       
-      // Place parameter in correct location
       switch (param.location) {
         case 'path':
           example.path = example.path.replace(`{${param.name}}`, value || `<${param.name}>`);
@@ -273,7 +263,6 @@ Extract all parameter information, examples, and requirements.`;
       }
     });
     
-    // Clean up empty objects
     if (Object.keys(example.query).length === 0) delete example.query;
     if (Object.keys(example.body).length === 0) delete example.body;
     
@@ -286,24 +275,20 @@ Extract all parameter information, examples, and requirements.`;
   ): Promise<string> {
     let enhancedKnowledge = action.knowledge;
     
-    // Add parameter documentation
     const paramSummary = this.generateParameterSummary(documentation);
     if (paramSummary) {
       enhancedKnowledge += '\n\n' + paramSummary;
     }
     
-    // Add example request
     const exampleRequest = this.buildExampleRequest(action, documentation);
     enhancedKnowledge += '\n\n## Example Request:\n```json\n' + 
       JSON.stringify(exampleRequest, null, 2) + '\n```';
     
-    // Add response format if available
     if (documentation.responseFormat && documentation.responseFormat.example) {
       enhancedKnowledge += '\n\n## Example Response:\n```json\n' + 
         JSON.stringify(documentation.responseFormat.example, null, 2) + '\n```';
     }
     
-    // Add any specific examples from documentation
     if (documentation.examples && documentation.examples.length > 0) {
       enhancedKnowledge += '\n\n## Additional Examples:';
       documentation.examples.forEach((ex, idx) => {
