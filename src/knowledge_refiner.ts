@@ -5,6 +5,9 @@ import { z } from 'zod';
 import { ModelDefinition, ExecutionContext } from './interface';
 import { EnhancedModelSelector } from './enhanced_model_selector';
 import { tokenTracker } from './global_token_tracker';
+import { initializeModel } from './utils/modelInitializer';
+import { trackLLMCall } from './utils/tokenTrackerUtils';
+
 
 const RefinementSchema = z.object({
   knowledge: z.string().nullable().describe("Updated knowledge text, or null if no changes needed"),
@@ -24,17 +27,7 @@ export class KnowledgeRefiner {
   
   this.useClaudeForRefinement = useClaudeForRefinement && !!process.env.ANTHROPIC_API_KEY;
   
-  if (this.useClaudeForRefinement) {
-    try {
-      this.llmModel = anthropic("claude-sonnet-4-20250514");
-    } catch (error) {
-      console.warn("Failed to initialize Claude for refinement, falling back to GPT-4.1");
-      this.llmModel = openai("gpt-4.1");
-      this.useClaudeForRefinement = false;
-    }
-  } else {
-    this.llmModel = openai("gpt-4.1");
-  }
+  this.llmModel = initializeModel(this.useClaudeForRefinement, 'knowledge-refiner');
 }
 
 private async analyzeAgentResponse(
@@ -71,22 +64,21 @@ Identify:
 3. What specific values should have been used?`;
 
   try {
-    const inputTokens = tokenTracker.estimateTokens(systemPrompt + userPrompt);
-    
-    const { text } = await generateText({
-      model: this.llmModel,
-      system: systemPrompt,
-      prompt: userPrompt,
-    });
-    
-    const outputTokens = tokenTracker.estimateTokens(text);
-    tokenTracker.trackUsage(
+    const text  = await trackLLMCall(
       this.useClaudeForRefinement ? 'claude-sonnet-4-20250514' : 'gpt-4.1',
-      inputTokens,
-      outputTokens,
+      systemPrompt,
+      userPrompt,
       'knowledge-refiner',
-      'analyze-agent-response'
-    );
+      'analyze-agent-response',
+      async () => {
+        const result = await generateText({
+          model: this.llmModel,
+          system: systemPrompt,
+          prompt: userPrompt,
+        });
+        return { result: result.text, outputText: result.text };
+      }
+    );    
 
     const missingParams: string[] = [];
     const requestedFromUser: string[] = [];
@@ -364,83 +356,5 @@ ${promptStrategy || 'Execute the action using the above values directly.'}`;
       knowledge: knowledge !== actionDetails.knowledge ? knowledge : undefined,
       promptStrategy
     };
-  }
-
-  async getExecutionOrder(analysisPrompt: string): Promise<string[] | null> {
-    try {
-      const systemPrompt = `You are a silent API workflow architect. Your only job is to determine the optimal execution order of API actions based on their function and dependencies.
-
-CRITICAL INSTRUCTIONS:
-- Analyze the user's list of actions carefully
-- Determine the logical sequence considering:
-  1. Resource creation must happen before using those resources
-  2. List operations can help discover existing resources
-  3. Update/Delete operations require existing resources
-  4. Some actions may be independent and can run in parallel
-- Your ONLY output MUST be a single, raw JSON array of the action "_id" strings in the correct execution order
-- Do NOT include any explanations, commentary, or markdown
-- Consider that some platforms have hierarchical resources (e.g., spreadsheet -> sheet -> values)
-
-Example Output:
-["id_of_create_spreadsheet", "id_of_create_sheet", "id_of_list_sheets", "id_of_update_values", "id_of_delete_sheet"]`;
-
-      const { text: analysisResult } = await generateText({
-        model: this.llmModel,
-        system: systemPrompt,
-        prompt: analysisPrompt,
-      });
-
-      const jsonMatch = analysisResult.match(/\[\s*"[^"]+"\s*(?:,\s*"[^"]+"\s*)*\]/);
-      if (jsonMatch && jsonMatch[0]) {
-        const sortedIds = JSON.parse(jsonMatch[0]);
-        if (Array.isArray(sortedIds) && sortedIds.length > 0) {
-          console.log(`Execution order determined: ${sortedIds.length} actions sorted`);
-          return sortedIds as string[];
-        }
-      }
-      
-      console.log("Could not parse a valid sorted ID array from the AI response.");
-      return null;
-
-    } catch (error) {
-      console.error('Error during execution order analysis:', error);
-      return null;
-    }
-  }
-
-  async generateSmartKnowledge(
-    action: ModelDefinition,
-    similarActions: ModelDefinition[],
-    platformContext: string
-  ): Promise<string | null> {
-    try {
-      const systemPrompt = `You are an API documentation expert. Generate clear, actionable knowledge for API actions based on similar actions and platform context.`;
-      
-      const userPrompt = `Generate knowledge for this action:
-Action: ${action.title}
-Method: ${action.action}
-Path: ${action.path}
-Platform: ${action.connectionPlatform}
-
-Similar actions from the same platform:
-${similarActions.slice(0, 3).map(a => `- ${a.title}: ${a.knowledge.substring(0, 200)}...`).join('\n')}
-
-Create knowledge that includes:
-1. Clear description
-2. Required and optional parameters
-3. Expected response format
-4. Common use cases`;
-
-      const { text } = await generateText({
-        model: this.llmModel,
-        system: systemPrompt,
-        prompt: userPrompt,
-      });
-
-      return text.trim();
-    } catch (error) {
-      console.error('Error generating smart knowledge:', error);
-      return null;
-    }
   }
 }

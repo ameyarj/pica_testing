@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { ModelDefinition } from './interface';
 import chalk from 'chalk';
 import { tokenTracker } from './global_token_tracker';
+import { trackLLMCall } from './utils/tokenTrackerUtils';
 
 const ApiDocumentationSchema = z.object({
   parameters: z.array(z.object({
@@ -104,21 +105,20 @@ export class ApiDocAnalyzer {
         
         Return the most relevant API documentation information.`;
       
-      const inputTokens = tokenTracker.estimateTokens(prompt);
-      
-      const { text } = await generateText({
-        model: this.searchModel,
-        prompt,
-        maxTokens: 4000
-      });
-      
-      const outputTokens = tokenTracker.estimateTokens(text);
-      tokenTracker.trackUsage(
+      const text = await trackLLMCall(
         'gpt-4o-search-preview',
-        inputTokens,
-        outputTokens,
+        '',
+        prompt,
         'api-doc-analyzer',
-        'search-documentation'
+        'search-documentation',
+        async () => {
+          const result = await generateText({
+            model: this.searchModel,
+            prompt,
+            maxTokens: 4000
+          });
+          return { result: result.text, outputText: result.text };
+        }
       );
 
       return text;
@@ -326,10 +326,5 @@ Extract all parameter information, examples, and requirements.`;
     }
     
     return enhancedKnowledge;
-  }
-
-  clearCache(): void {
-    this.cache.clear();
-    console.log(chalk.gray('   🗑️ API documentation cache cleared'));
   }
 }

@@ -1,4 +1,4 @@
-import { PicaApiService } from './pica_api_service';
+import { PicaApiService } from './connectors/pica_api_service';
 import { EnhancedAgentService } from './agent_service';
 import { KnowledgeRefiner } from './knowledge_refiner';
 import { ContextManager } from './context_manager';
@@ -144,9 +144,11 @@ export class EnhancedPicaosTestingOrchestrator {
 
     console.log(chalk.bold.blue(`\n🎯 Testing: "${action.title}" (${action.modelName})`));
     if (results.length > 0 && results.length % 5 === 0) {
-      this.logger.generateSummaryReportAsync().catch(err =>
-        console.error('Error generating intermediate summary:', err)
-      );
+      try {
+        this.logger.generateSummaryReport();
+      } catch (err) {
+        console.error('Error generating intermediate summary:', err);
+      }
     }
     if (actionMetadata) {
       console.log(chalk.gray(`   Priority: ${actionMetadata.priority}, Optional: ${actionMetadata.isOptional}`));

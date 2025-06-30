@@ -8,12 +8,14 @@ import { generateText, generateObject, LanguageModel } from "ai";
 import { z } from 'zod';
 import { ModelDefinition, ExecutionContext, ExtractedDataEnhanced } from './interface';
 import { PathParameterResolver } from './path_resolver';
-import { URLValidator } from './url_validator';
 import { EnhancedModelSelector } from './enhanced_model_selector';
 import { ExecutionLogger } from './execution_logger';
-import { ConversationHandler, ConversationState, ResponsePattern } from './conversation_handler';
+import { ConversationHandler } from './conversation_handler';
 import { tokenTracker } from './global_token_tracker';
-
+import { initializeModel } from './utils/modelInitializer';
+import { extractResourceFromTitle } from './utils/resourceExtractor';
+import { trackLLMCall } from './utils/tokenTrackerUtils';
+import { extractParametersFromPath } from './utils/pathUtils';
 import chalk from 'chalk';
 
 const ExtractedDataSchema = z.object({
@@ -72,20 +74,9 @@ export class EnhancedAgentService {
   if (!openAIApiKey && !process.env.ANTHROPIC_API_KEY) {
     console.warn("Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY provided; LLM interactions may fail.");
   }
-  // this.logger = new ExecutionLogger();
   this.useClaudeForAgent = useClaudeForAgent && !!process.env.ANTHROPIC_API_KEY;
   
-  if (this.useClaudeForAgent) {
-    try {
-      this.analysisModel = anthropic("claude-sonnet-4-20250514");
-    } catch (error) {
-      console.warn("Failed to initialize Claude, falling back to GPT-4.1");
-      this.analysisModel = openai("gpt-4.1");
-      this.useClaudeForAgent = false;
-    }
-  } else {
-    this.analysisModel = openai("gpt-4.1");
-  }
+  this.analysisModel = initializeModel(this.useClaudeForAgent, 'agent-service-analysis');
 
   this.picaClient = new Pica(picaSecretKey, {
     connectors: ["*"],
@@ -109,9 +100,7 @@ setLogger(logger: ExecutionLogger): void {
   private async initializeAgent(openAIApiKey: string) {
     const systemPrompt = await this.picaClient.generateSystemPrompt();
     
-    const agentModel = this.useClaudeForAgent 
-      ? anthropic("claude-sonnet-4-20250514")
-      : openai("gpt-4.1");
+    const agentModel = initializeModel(this.useClaudeForAgent, 'agent-service');
     
     this.agent = new Agent({
       name: "PicaTestingAgent",
@@ -190,7 +179,7 @@ You must adapt to any platform (Google, Microsoft, Slack, etc.) and any model (e
   let finalPrompt = humanLikePrompt;
 
   if (action.path && (action.path.includes('{{') || action.path.includes(':'))) {
-    const requiredParams = URLValidator.extractParametersFromPath(action.path);
+    const requiredParams = extractParametersFromPath(action.path);
     
     if (requiredParams.length > 0) {
       finalPrompt += "\n\n⚠️ CRITICAL URL PARAMETERS NEEDED:\n";
@@ -249,21 +238,6 @@ You must adapt to any platform (Google, Microsoft, Slack, etc.) and any model (e
   return finalPrompt;
 }
 
-async discoverParameters(action: ModelDefinition): Promise<any> {
-    try {
-      const paramDiscoveryPrompt = `What parameters are required for the action "${action.title}"? List all required and optional parameters with their types and examples.`;
-      
-      const result = await this.agent.generate(paramDiscoveryPrompt, {
-        threadId: `param-discovery-${Date.now()}`,
-        resourceId: action._id
-      });
-
-      return result.text || null;
-    } catch (error) {
-      return null;
-    }
-  }
-
   private buildHumanLikePrompt(
     action: Readonly<ModelDefinition>,
     context: ExecutionContext,
@@ -307,7 +281,7 @@ async discoverParameters(action: ModelDefinition): Promise<any> {
     const actionName = action.actionName.toLowerCase();
     const platform = action.connectionPlatform.replace('-', ' ');
     
-    const resourceName = this.extractResourceFromTitle(action.title);
+    const resourceName = extractResourceFromTitle(action.title);
     
     if (history.length > 0 && context.availableIds && context.availableIds.size > 0) {
       if (actionName.includes('create')) {
@@ -330,37 +304,6 @@ async discoverParameters(action: ModelDefinition): Promise<any> {
     }
   }
 
-  private readonly HTTP_ACTION_VERBS = [
-    'create', 'get', 'update', 'delete', 'patch', 'put', 'post',
-    'retrieve', 'list', 'fetch', 'remove', 'modify', 'add', 'insert',
-    'search', 'query', 'find', 'read', 'write', 'edit', 'replace'
-  ];
-
-
-  private extractResourceFromTitle(title: string): string {
-    let resourceName = title.toLowerCase();
-    
-    const words = resourceName.split(/\s+/);
-    if (words.length > 0 && this.HTTP_ACTION_VERBS.includes(words[0])) {
-      words.shift(); 
-    }
-    
-    const modifiers = ['new', 'existing', 'specific', 'all', 'single', 'multiple'];
-    const filteredWords = words.filter(word => !modifiers.includes(word));
-    
-    resourceName = filteredWords.join(' ').trim();
-    
-    if (resourceName === '' || resourceName === 'a' || resourceName === 'the') {
-      if (title.toLowerCase().includes('time')) return 'time schedule';
-      if (title.toLowerCase().includes('project')) return 'project';
-      if (title.toLowerCase().includes('user')) return 'user';
-      if (title.toLowerCase().includes('issue')) return 'issue';
-      if (title.toLowerCase().includes('task')) return 'task';
-      return 'resource';
-    }
-    
-    return resourceName;
-  }
   
   private async analyzeExecutionResultWithLLM(
     outputText: string,
@@ -402,29 +345,29 @@ ${outputText || "No text output."}
 \`\`\`
 `;
     try {
-      const inputTokens = tokenTracker.estimateTokens(systemPrompt + userPrompt);
-      
-      let { text } = await generateText({
-        model,
-        system: systemPrompt,
-        prompt: userPrompt,
-      });
-      
-      const outputTokens = tokenTracker.estimateTokens(text);
-      tokenTracker.trackUsage(
-        modelToUse,
-        inputTokens,
-        outputTokens,
-        'agent-service',
-        'analyze-execution-result'
-      );
+      const text = await trackLLMCall(
+      modelToUse,
+      systemPrompt,
+      userPrompt,
+      'agent-service',
+      'analyze-execution-result',
+      async () => {
+        const result = await generateText({
+          model,
+          system: systemPrompt,
+          prompt: userPrompt,
+        });
+        return { result: result.text, outputText: result.text };
+      }
+    );
 
+      let jsonString = text;
       const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
       if (jsonMatch && jsonMatch[1]) {
-        text = jsonMatch[1];
+        jsonString = jsonMatch[1];
       }
 
-      const jsonResponse = JSON.parse(text);
+      const jsonResponse = JSON.parse(jsonString);
       if (typeof jsonResponse.success === 'boolean' && typeof jsonResponse.reason === 'string') {
         const isPermissionError = outputText.toLowerCase().includes('403') && 
           (outputText.toLowerCase().includes('permission') || 

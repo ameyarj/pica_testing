@@ -1,10 +1,9 @@
 import { ModelDefinition } from './interface';
-import { openai } from "@ai-sdk/openai";
-import { anthropic } from "@ai-sdk/anthropic";
 import { generateObject, LanguageModel } from "ai";
 import { ApiDocAnalyzer } from './api_doc_analyzer';
 import { z } from 'zod';
 import chalk from 'chalk';
+import { initializeModel } from './utils/modelInitializer';
 
 interface ChunkResult {
   nodes: any[];
@@ -41,16 +40,7 @@ export class EnhancedDependencyAnalyzer {
   private apiDocAnalyzer: ApiDocAnalyzer;
   
   constructor(private useClaudeForAnalysis: boolean = true) {
-  if (useClaudeForAnalysis && process.env.ANTHROPIC_API_KEY) {
-    try {
-      this.analysisModel = anthropic("claude-sonnet-4-20250514");
-    } catch (error) {
-      console.warn("Failed to initialize Claude for analysis, falling back to GPT-4.1");
-      this.analysisModel = openai("gpt-4.1");
-    }
-  } else {
-    this.analysisModel = openai("gpt-4.1");
-  }
+  this.analysisModel = initializeModel(useClaudeForAnalysis, 'dependency-analyzer');
   
   this.apiDocAnalyzer = new ApiDocAnalyzer();
 }

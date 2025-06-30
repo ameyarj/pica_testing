@@ -1,8 +1,8 @@
 import { ModelDefinition, ExecutionContext } from './interface';
-import { openai } from "@ai-sdk/openai";
-import { anthropic } from "@ai-sdk/anthropic";
-import { generateText, LanguageModel } from "ai";
+import { LanguageModel } from "ai";
 import { PathParameterResolver } from './path_resolver';
+import { extractResourceFromTitle } from './utils/resourceExtractor';
+import { initializeModel } from './utils/modelInitializer';
 
 export interface PromptStrategy {
   tone: 'conversational' | 'technical' | 'step-by-step' | 'contextual';
@@ -15,49 +15,9 @@ export class EnhancedPromptGenerator {
   private llmModel: LanguageModel;
   private promptHistory: Map<string, { prompt: string; success: boolean }[]> = new Map();
 
-  private readonly HTTP_ACTION_VERBS = [
-    'create', 'get', 'update', 'delete', 'patch', 'put', 'post',
-    'retrieve', 'list', 'fetch', 'remove', 'modify', 'add', 'insert',
-    'search', 'query', 'find', 'read', 'write', 'edit', 'replace'
-  ];
-
   constructor(private useClaudeForPrompting: boolean = true) {
-  if (useClaudeForPrompting && process.env.ANTHROPIC_API_KEY) {
-    try {
-      this.llmModel = anthropic("claude-sonnet-4-20250514");
-    } catch (error) {
-      console.warn("Failed to initialize Claude for prompting, falling back to GPT-4.1");
-      this.llmModel = openai("gpt-4.1");
-    }
-  } else {
-    this.llmModel = openai("gpt-4.1");
-  }
+  this.llmModel = initializeModel(useClaudeForPrompting, 'prompt-generator');
 }
-
-  private extractResourceFromTitle(title: string): string {
-    let resourceName = title.toLowerCase();
-    
-    const words = resourceName.split(/\s+/);
-    if (words.length > 0 && this.HTTP_ACTION_VERBS.includes(words[0])) {
-      words.shift(); 
-    }
-    
-    const modifiers = ['new', 'existing', 'specific', 'all', 'single', 'multiple'];
-    const filteredWords = words.filter(word => !modifiers.includes(word));
-    
-    resourceName = filteredWords.join(' ').trim();
-    
-    if (resourceName === '' || resourceName === 'a' || resourceName === 'the') {
-      if (title.toLowerCase().includes('time')) return 'time schedule';
-      if (title.toLowerCase().includes('project')) return 'project';
-      if (title.toLowerCase().includes('user')) return 'user';
-      if (title.toLowerCase().includes('issue')) return 'issue';
-      if (title.toLowerCase().includes('task')) return 'task';
-      return 'resource';
-    }
-    
-    return resourceName;
-  }
 
   private getNaturalActionVerb(actionName: string): string {
     const action = actionName.toLowerCase();
@@ -183,7 +143,6 @@ export class EnhancedPromptGenerator {
     contextLevel: hasContext ? 'extensive' : 'moderate'
   };
 }
-
   private async buildPrompt(
   action: ModelDefinition,
   context: ExecutionContext,
@@ -222,7 +181,7 @@ export class EnhancedPromptGenerator {
     (!context.availableIds || context.availableIds.size === 0);
 
   if (isCreateWithNoContext) {
-    const resourceName = this.extractResourceFromTitle(action.title);
+    const resourceName = extractResourceFromTitle(action.title);
     prompt += `Create a ${resourceName}. `;
     prompt += `IMPORTANT: If you need values like userId, emails, or other IDs:\n`;
     prompt += `1. First try to retrieve them from the system (e.g., list existing users)\n`;
@@ -338,7 +297,7 @@ private incorporateResponseRefinements(
 
   private getConversationalOpening(action: ModelDefinition, context: ExecutionContext): string {
     const platform = action.connectionPlatform.replace(/-/g, ' ');
-    const resourceName = this.extractResourceFromTitle(action.title);
+    const resourceName = extractResourceFromTitle(action.title);
     const actionVerb = this.getNaturalActionVerb(action.actionName);
     
     const openings = [
@@ -351,7 +310,7 @@ private incorporateResponseRefinements(
   }
 
   private getStepByStepOpening(action: ModelDefinition, context: ExecutionContext): string {
-    const resourceName = this.extractResourceFromTitle(action.title);
+    const resourceName = extractResourceFromTitle(action.title);
     const actionVerb = this.getNaturalActionVerb(action.actionName);
     
     return `Let's carefully ${actionVerb} a ${resourceName} step by step:\n\n` +
@@ -361,12 +320,12 @@ private incorporateResponseRefinements(
   }
 
   private getTechnicalOpening(action: ModelDefinition, context: ExecutionContext): string {
-    const resourceName = this.extractResourceFromTitle(action.title);
+    const resourceName = extractResourceFromTitle(action.title);
     return `Execute ${action.actionName.toUpperCase()} operation on ${resourceName} via ${action.connectionPlatform}. `;
   }
 
   private getContextualOpening(action: ModelDefinition, context: ExecutionContext): string {
-    const resourceName = this.extractResourceFromTitle(action.title);
+    const resourceName = extractResourceFromTitle(action.title);
     const actionVerb = this.getNaturalActionVerb(action.actionName);
     const recentSuccess = context.recentActions.filter(a => a.success).slice(-1)[0];
     
@@ -473,11 +432,10 @@ private buildPathSection(action: ModelDefinition, context: ExecutionContext): st
   
   return section;
 }
-
   private getRelevantExamples(action: ModelDefinition, context: ExecutionContext): string[] {
     const examples: string[] = [];
     const platform = action.connectionPlatform.toLowerCase();
-    const resourceName = this.extractResourceFromTitle(action.title);
+    const resourceName = extractResourceFromTitle(action.title);
     const actionName = action.actionName.toLowerCase();
     
     if (actionName.includes('create')) {

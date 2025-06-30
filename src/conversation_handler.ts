@@ -1,5 +1,3 @@
-import { z } from 'zod';
-
 export interface ConversationTurn {
   role: 'user' | 'assistant';
   content: string;

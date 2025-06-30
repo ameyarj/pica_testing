@@ -43,7 +43,6 @@ async function main() {
   } catch (error) {
     console.error(chalk.red.bold('\n💥 An unhandled error occurred during orchestration:'), error);
   }
-  // The orchestrator's start() method already handles summary generation in its finally block
 }
 
 process.on('unhandledRejection', (reason, promise) => {

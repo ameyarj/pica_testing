@@ -104,46 +104,6 @@ export class ExecutionLogger {
     fs.writeFileSync(this.currentLogFile, JSON.stringify(logData, null, 2));
   }
 
-  async logExecutionAsync(entry: Omit<LogEntry, 'timestamp' | 'sessionId'>): Promise<void> {
-    const fullEntry: LogEntry = {
-      ...entry,
-      timestamp: new Date().toISOString(),
-      sessionId: this.sessionId
-    };
-
-    this.totalCost += entry.tokens.cost;
-    const modelKey = entry.tokens.model;
-    const current = this.modelUsage.get(modelKey) || { tokens: 0, cost: 0 };
-    this.modelUsage.set(modelKey, {
-      tokens: current.tokens + entry.tokens.input + entry.tokens.output,
-      cost: current.cost + entry.tokens.cost
-    });
-
-    try {
-      const logData = JSON.parse(await fs.promises.readFile(this.currentLogFile, 'utf-8'));
-      logData.entries.push(fullEntry);
-      await fs.promises.writeFile(this.currentLogFile, JSON.stringify(logData, null, 2));
-    } catch (error) {
-      console.error('Error writing to log file:', error);
-    }
-  }
-
-  async generateSummaryReportAsync(): Promise<void> {
-    try {
-      const summaryContent = await this.buildSummaryContent();
-      const summaryFile = path.join(this.logDir, `${this.sessionId}_summary.md`);
-      await fs.promises.writeFile(summaryFile, summaryContent);
-    } catch (error) {
-      console.error('Error generating summary:', error);
-    }
-  }
-
-  private async buildSummaryContent(): Promise<string> {
-    const logData = JSON.parse(await fs.promises.readFile(this.currentLogFile, 'utf-8'));
-    let summary = '# Execution Summary\n\n';
-    return summary;
-  }
-
   generateSummaryReport(): void {
     const summaryFile = path.join(this.logDir, `${this.sessionId}_summary.md`);
     let logData: { entries: LogEntry[], startTime?: string } = { entries: [] };
