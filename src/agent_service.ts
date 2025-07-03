@@ -677,7 +677,7 @@ ${outputText || "No text output."}
             outputTokens
           )
         },
-        duration: Date.now() - Date.now() 
+        duration: Date.now() - startTime
       });
     }
     

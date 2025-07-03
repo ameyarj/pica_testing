@@ -1,7 +1,7 @@
 import { PicaApiService } from './connectors/pica_api_service';
 import { EnhancedAgentService } from './agent_service';
 import { KnowledgeRefiner } from './knowledge_refiner';
-import { ContextManager } from './context_manager';
+import { EnhancedContextManager } from './enhanced_context_manager';
 import { EnhancedDependencyAnalyzer } from './dependency_analyzer';
 import { EnhancedPromptGenerator } from './prompt_generator';
 import { ConnectionDefinition, ModelDefinition, ActionResult, ExecutionContext } from './interface';
@@ -29,19 +29,20 @@ export class EnhancedPicaosTestingOrchestrator {
   private picaApiService: PicaApiService;
   private agentService: EnhancedAgentService;
   private knowledgeRefiner: KnowledgeRefiner;
-  private contextManager: ContextManager;
+  private contextManager: EnhancedContextManager;
   private dependencyAnalyzer: EnhancedDependencyAnalyzer;
   private promptGenerator: EnhancedPromptGenerator;
   private maxRetriesPerAction: number = 3;
   private useClaudeModels: boolean = true;
   private logger: ExecutionLogger | undefined;
   private permissionFailedActions: Set<string> = new Set();
+  private useLLMPrompts: boolean = true; // Flag to enable new LLM-based prompts
 
   constructor(picaSdkSecretKey: string, openAIApiKey: string) {
     this.picaApiService = new PicaApiService(picaSdkSecretKey);
     this.agentService = new EnhancedAgentService(picaSdkSecretKey, openAIApiKey);
     this.knowledgeRefiner = new KnowledgeRefiner(openAIApiKey);
-    this.contextManager = new ContextManager();
+    this.contextManager = new EnhancedContextManager(this.useClaudeModels);
     this.dependencyAnalyzer = new EnhancedDependencyAnalyzer(this.useClaudeModels);
     this.promptGenerator = new EnhancedPromptGenerator(this.useClaudeModels);
   }
@@ -265,59 +266,41 @@ export class EnhancedPicaosTestingOrchestrator {
   }
 
   private saveModifiedKnowledge(platformName: string, results: EnhancedActionResult[]): void {
-  
-  const successfulModified = results.filter(r => {
-  return r.success && 
-         r.finalKnowledge && 
-         r.finalKnowledge !== r.originalKnowledge 
-});
-  
-  if (successfulModified.length === 0) {
-    console.log(chalk.gray('\nNo modified knowledge to save.'));
-    return;
-  }
-  
-  const knowledgeDir = path.join(process.cwd(), 'knowledge', platformName);
-  if (!fs.existsSync(knowledgeDir)) {
-    fs.mkdirSync(knowledgeDir, { recursive: true });
-  }
-  
-  console.log(chalk.blue(`\n💾 Saving ${successfulModified.length} refined knowledge files...`));
-  
-  successfulModified.forEach(result => {
-    const actionTitle = result.actionTitle.replace(/[<>:"/\\|?*]/g, '_').replace(/\s+/g, '_');
-    const actionId = (result.actionId || 'unknown').replace(/[<>:"/\\|?*:]/g, '_');
-    const filename = `${actionTitle}_${actionId.substring(0, 20)}.md`;
-    const filepath = path.join(knowledgeDir, filename);
+    const modifiedKnowledgeActions = results.filter(r => {
+      return r.finalKnowledge && 
+             r.finalKnowledge !== r.originalKnowledge && 
+             !r.error?.includes("Skipped");
+    });
     
-    const content = `# ${result.actionTitle}\n\n## Model: ${result.modelName}\n\n## Knowledge\n\n${result.finalKnowledge}`;
+    if (modifiedKnowledgeActions.length === 0) {
+      console.log(chalk.gray('\nNo modified knowledge to save.'));
+      return;
+    }
     
-    fs.writeFileSync(filepath, content);
-    console.log(chalk.green(`   ✓ Saved: ${filename}`));
-  });
-}
-
-private saveKnowledgeImmediately(action: ModelDefinition, refinedKnowledge: string): void {
-  try {
-    const platformName = action.connectionPlatform;
     const knowledgeDir = path.join(process.cwd(), 'knowledge', platformName);
     if (!fs.existsSync(knowledgeDir)) {
       fs.mkdirSync(knowledgeDir, { recursive: true });
     }
     
-    const actionTitle = action.title.replace(/[<>:"/\\|?*]/g, '_').replace(/\s+/g, '_');
-    const actionId = action._id.replace(/[<>:"/\\|?*]/g, '_');
-    const filename = `${actionTitle}_${actionId.substring(0, 20)}.md`;
-    const filepath = path.join(knowledgeDir, filename);
-    const content = `# ${action.title}\n\n## Model: ${action.modelName}\n\n## Knowledge\n\n${refinedKnowledge}`;
+    console.log(chalk.blue(`\n💾 Saving ${modifiedKnowledgeActions.length} refined knowledge files...`));
     
-    fs.writeFileSync(filepath, content);
-    console.log(chalk.gray(`   💾 Knowledge saved: ${filename}`));
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-    console.log(chalk.yellow(`   ⚠️ Failed to save knowledge: ${errorMessage}`));
+    modifiedKnowledgeActions.forEach(result => {
+      const actionId = (result.actionId || 'unknown').replace("::", "_");
+      
+      const prefix = result.success ? '' : 'failed_';
+      const filename = `${prefix}${actionId}.md`;
+      const filepath = path.join(knowledgeDir, filename);
+      
+      const content = `# ${result.actionTitle}\n\n## Model: ${result.modelName}\n\n${result.finalKnowledge}`;
+      
+      fs.writeFileSync(filepath, content);
+      
+      const statusColor = result.success ? chalk.green : chalk.red;
+      const statusText = result.success ? 'Success' : 'Failed';
+      console.log(statusColor(`   ✓ Saved ${statusText}: ${filename}`));
+    });
   }
-}
+
 
   private validateActionPath(
   action: ModelDefinition, 
@@ -380,15 +363,59 @@ private saveKnowledgeImmediately(action: ModelDefinition, refinedKnowledge: stri
     attempts++;
     console.log(chalk.blue(`   Attempt ${attempts}/${maxAttempts}...`));
     const context = this.contextManager.getContext();
-    const { prompt, strategy } = await this.promptGenerator.generateAdaptivePrompt(
+    
+    let prompt: string;
+    let strategy: any;
+    let confidence = 0.8;
+    let reasoning = "";
+    
+    if (this.useLLMPrompts && attempts === 1) {
+      console.log(chalk.cyan(`   🤖 Using LLM-based human prompt generation...`));
+      try {
+        const llmResult = await this.promptGenerator.generateHumanLikePrompt(
           { ...action, knowledge: currentKnowledge },
           context,
-          [],
+          dependencyGraph,
           attempts,
           previousError || lastError,
-          dependencyGraph,
-          lastAgentResponse 
+          await this.picaApiService.getModelDefinitions(action.connectionPlatform)
         );
+        
+        prompt = llmResult.prompt;
+        strategy = llmResult.strategy;
+        confidence = llmResult.confidence;
+        reasoning = llmResult.reasoning;
+        
+        console.log(chalk.green(`   ✅ Generated human-like prompt (${confidence}% confidence)`));
+        console.log(chalk.gray(`   💭 ${reasoning}`));
+        
+      } catch (error) {
+        console.log(chalk.yellow(`   ⚠️ LLM prompt generation failed, using fallback...`));
+        const resourceName = action.title.toLowerCase();
+        prompt = `Please help me ${action.actionName.toLowerCase()} a ${resourceName} using ${action.connectionPlatform}.\n\n${action.knowledge}\n\nUse Action ID: ${action._id}`;
+        strategy = { tone: 'technical', emphasis: ['execute action'], examples: false, contextLevel: 'minimal' };
+      }
+    } else {
+      try {
+        const llmResult = await this.promptGenerator.generateHumanLikePrompt(
+          { ...action, knowledge: currentKnowledge },
+          context,
+          dependencyGraph,
+          attempts,
+          previousError || lastError,
+          await this.picaApiService.getModelDefinitions(action.connectionPlatform)
+        );
+        
+        prompt = llmResult.prompt;
+        strategy = llmResult.strategy;
+        confidence = llmResult.confidence;
+        reasoning = llmResult.reasoning;
+      } catch (error) {
+        const resourceName = action.title.toLowerCase();
+        prompt = `Retry: ${action.actionName.toLowerCase()} a ${resourceName} using ${action.connectionPlatform}.\n\nPrevious error: ${previousError || lastError}\n\n${action.knowledge}\n\nUse Action ID: ${action._id}`;
+        strategy = { tone: 'technical', emphasis: ['retry action', 'fix previous error'], examples: false, contextLevel: 'minimal' };
+      }
+    }
     
     strategyUsed = strategy.tone;
     
@@ -402,9 +429,6 @@ private saveKnowledgeImmediately(action: ModelDefinition, refinedKnowledge: stri
     
     if (agentResult.success) {
       console.log(chalk.green(`   ✅ SUCCESS: ${agentResult.analysisReason || "Completed"}`));
-      if (currentKnowledge !== action.knowledge) {
-      this.saveKnowledgeImmediately(action, currentKnowledge);
-      }
       this.promptGenerator.recordPromptResult(action._id, prompt, true);
       
       if (agentResult.extractedData) {
@@ -494,8 +518,9 @@ private saveKnowledgeImmediately(action: ModelDefinition, refinedKnowledge: stri
 
       if (refinement.knowledge && refinement.knowledge !== currentKnowledge) {
         this.displayKnowledgeDiff(currentKnowledge, refinement.knowledge);
+        
+        
         currentKnowledge = refinement.knowledge;
-        this.saveKnowledgeImmediately(action, currentKnowledge);
       }
     }
   }

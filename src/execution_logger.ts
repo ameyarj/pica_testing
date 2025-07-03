@@ -47,6 +47,13 @@ export class ExecutionLogger {
   private totalCost: number = 0;
   private modelUsage: Map<string, { tokens: number; cost: number }> = new Map();
 
+  private isRealAction(action: string): boolean {
+    return !action.includes('-prompt-generation') && 
+           !action.includes('-knowledge-refinement') &&
+           !action.includes('prompt-generation') &&
+           !action.includes('knowledge-refinement');
+  }
+
   constructor(platformName?: string) {
     const now = new Date();
     const istOffset = 5.5 * 60 * 60 * 1000; 
@@ -184,6 +191,10 @@ export class ExecutionLogger {
     }>();
 
     for (const entry of entries) {
+      if (!this.isRealAction(entry.action)) {
+        continue; 
+      }
+      
       const key = `${entry.actionId}`;
       const existing = actionDetailsMap.get(key);
       
@@ -222,6 +233,10 @@ export class ExecutionLogger {
 
     const strategyMap = new Map<string, { total: number; success: number }>();
     for (const entry of entries) {
+      if (!this.isRealAction(entry.action)) {
+        continue; 
+      }
+      
       const strategy = entry.prompt.strategy;
       const current = strategyMap.get(strategy) || { total: 0, success: 0 };
       current.total++;

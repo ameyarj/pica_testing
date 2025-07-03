@@ -1,23 +1,42 @@
+import { generateText, generateObject } from "ai";
+import { z } from 'zod';
 import { ModelDefinition, ExecutionContext } from './interface';
 import { LanguageModel } from "ai";
-import { PathParameterResolver } from './path_resolver';
-import { extractResourceFromTitle } from './utils/resourceExtractor';
+import { 
+  PromptGenerationContext, 
+  LLMPromptGenerationResponse,
+  PromptPattern,
+  PromptLearningData,
+  PromptStrategy 
+} from './interface';
 import { initializeModel } from './utils/modelInitializer';
+import { trackLLMCall } from './utils/tokenTrackerUtils';
+import { EnhancedContextManager } from './enhanced_context_manager';
+import chalk from 'chalk';
 
-export interface PromptStrategy {
-  tone: 'conversational' | 'technical' | 'step-by-step' | 'contextual';
-  emphasis: string[];
-  examples: boolean;
-  contextLevel: 'minimal' | 'moderate' | 'extensive';
-}
+const PromptGenerationSchema = z.object({
+  prompt: z.string().describe("Natural, conversational prompt that a real user would type"),
+  confidence: z.number().min(0).max(1).describe("Confidence in the prompt quality (0-1)"),
+  reasoning: z.string().describe("Brief explanation of why this prompt was chosen"),
+  alternativePrompts: z.array(z.string()).describe("2-3 alternative prompts for variety"),
+  contextUsed: z.array(z.string()).describe("List of context elements that were incorporated"),
+  suggestedTestData: z.record(z.any()).describe("Realistic test data that should be used")
+});
 
 export class EnhancedPromptGenerator {
   private llmModel: LanguageModel;
   private promptHistory: Map<string, { prompt: string; success: boolean }[]> = new Map();
+  private enhancedContextManager: EnhancedContextManager;
+  
+  private promptPatterns: Map<string, PromptPattern> = new Map();
+  private learningData: PromptLearningData[] = [];
+  private platformTerminology: Map<string, Map<string, string>> = new Map();
 
   constructor(private useClaudeForPrompting: boolean = true) {
-  this.llmModel = initializeModel(useClaudeForPrompting, 'prompt-generator');
-}
+    this.llmModel = initializeModel(useClaudeForPrompting, 'prompt-generator');
+    this.enhancedContextManager = new EnhancedContextManager(useClaudeForPrompting);
+    this.initializePlatformTerminology();
+  }
 
   private getNaturalActionVerb(actionName: string): string {
     const action = actionName.toLowerCase();
@@ -32,434 +51,490 @@ export class EnhancedPromptGenerator {
     return action; 
   }
 
-  async generateAdaptivePrompt(
-  action: ModelDefinition,
-  context: ExecutionContext,
-  history: readonly any[],
-  attemptNumber: number = 1,
-  previousError?: string,
-  dependencyGraph?: any,
-  previousResponse?: string,
-  useConversation: boolean = false 
-): Promise<{ prompt: string; strategy: PromptStrategy }> {
-  
-  const strategy = this.determinePromptStrategy(action, context, attemptNumber, previousError, useConversation);
-  
-  const examples = this.getRelevantExamples(action, context);
-  
-  let prompt = await this.buildPrompt(action, context, strategy, examples, dependencyGraph, previousError, previousResponse);
-  
-  if (previousResponse) {
-    prompt = this.incorporateResponseRefinements(prompt, action, context, previousResponse);
-  }
-  
-  const actionKey = `${action.connectionPlatform}:${action.modelName}:${action.actionName}`;
-  if (!this.promptHistory.has(actionKey)) {
-    this.promptHistory.set(actionKey, []);
-  }
-  
-  return { prompt, strategy };
-}
+  async generateHumanLikePrompt(
+    action: ModelDefinition,
+    context: ExecutionContext,
+    dependencyGraph?: any,
+    attemptNumber: number = 1,
+    previousError?: string,
+    allActions?: ModelDefinition[]
+  ): Promise<{ prompt: string; strategy: PromptStrategy; confidence: number; reasoning: string }> {
+    console.log(chalk.cyan(`   🤖 Generating human-like prompt for: ${action.title}`));
 
-  private determinePromptStrategy(
-  action: ModelDefinition,
-  context: ExecutionContext,
-  attemptNumber: number,
-  previousError?: string,
-  useConversation?: boolean
-): PromptStrategy {
-  const actionName = action.actionName.toLowerCase();
-  const hasContext = context.availableIds && context.availableIds.size > 0;
-  const needsId = action.path.includes('{{');
+    try {
+      const promptContext = await this.enhancedContextManager.buildPromptGenerationContext(
+        action,
+        dependencyGraph,
+        attemptNumber,
+        previousError,
+        allActions
+      );
 
-  if (actionName.includes('create') && !hasContext) {
-    return {
-      tone: 'technical',
-      emphasis: ['generate all required data', 'use test values', 'execute immediately'],
-      examples: true,
-      contextLevel: 'minimal'
-    };
-  }
+      this.enhancedContextManager.recordPrompt(
+        `About to generate prompt for ${action.title}`
+      );
 
-  if (needsId && hasContext) {
-    return {
-      tone: 'contextual',
-      emphasis: ['use the provided IDs from context', 'do not ask for IDs', 'IDs are already available'],
-      examples: true,
-      contextLevel: 'extensive'
-    };
-  }
+      const llmResponse = await this.generateHumanPrompt(
+        action,
+        promptContext,
+        'conversational',
+        'friendly'
+      );
 
-  if (attemptNumber === 1) {
-    if (actionName.includes('create')) {
-      return {
+      if (llmResponse.confidence > 0.7) {
+        this.recordPromptSuccess(
+          llmResponse.prompt,
+          action,
+          promptContext,
+          0 
+        );
+      }
+
+      const strategy: PromptStrategy = {
         tone: 'conversational',
-        emphasis: ['realistic data', 'professional naming'],
-        examples: true,
-        contextLevel: hasContext ? 'moderate' : 'minimal'
+        emphasis: ['natural user language', 'use context naturally', 'realistic business scenario'],
+        examples: llmResponse.alternativePrompts.length > 0,
+        contextLevel: promptContext.executionContext.availableIds?.size > 0 ? 'extensive' : 'minimal'
       };
-    } else if (actionName.includes('get') || actionName.includes('list')) {
-      return {
-        tone: 'technical',
-        emphasis: ['fetch all data', 'include IDs'],
-        examples: false,
-        contextLevel: hasContext ? 'extensive' : 'minimal'
-      };
-    }
-  }
 
-  if (previousError) {
-    if (previousError && (previousError.includes('403') || previousError.includes('permission') || 
-        previousError.includes('forbidden') || previousError.includes('scope'))) {
+      let enhancedPrompt = llmResponse.prompt;
+      
+      if (attemptNumber > 1 || previousError) {
+        enhancedPrompt += `\n\n---\n### Technical Context\n${action.knowledge}`;
+        enhancedPrompt += `\n\n### Action ID\nUse Action ID: ${action._id}`;
+      } else {
+        enhancedPrompt += `\n\n(Use action: ${action.title})`;
+      }
+
+      console.log(chalk.green(`   ✅ Generated human prompt with ${llmResponse.confidence}% confidence`));
+      console.log(chalk.gray(`   💡 Reasoning: ${llmResponse.reasoning}`));
+
       return {
+        prompt: enhancedPrompt,
+        strategy,
+        confidence: llmResponse.confidence,
+        reasoning: llmResponse.reasoning
+      };
+
+    } catch (error) {
+      console.error(chalk.red(`   ❌ Error generating human-like prompt: ${error}`));
+      
+      const resourceName = action.title.toLowerCase();
+      const actionVerb = this.getNaturalActionVerb(action.actionName);
+      const fallbackPrompt = `Please help me ${actionVerb} a ${resourceName} using ${action.connectionPlatform}.\n\n${action.knowledge}\n\nUse Action ID: ${action._id}`;
+      
+      const fallbackStrategy: PromptStrategy = {
         tone: 'technical',
-        emphasis: ['check authentication', 'verify permissions', 'this appears to be a permission issue'],
+        emphasis: ['execute action'],
         examples: false,
         contextLevel: 'minimal'
       };
-    }
 
-    if (previousError.includes('missing') || previousError.includes('required')) {
       return {
-        tone: 'step-by-step',
-        emphasis: ['use context IDs', 'check requirements', 'IDs are in the context above'],
-        examples: true,
-        contextLevel: 'extensive'
-      };
-    } else if (previousError.includes('format') || previousError.includes('invalid')) {
-      return {
-        tone: 'technical',
-        emphasis: ['exact format', 'data types'],
-        examples: true,
-        contextLevel: 'moderate'
+        prompt: fallbackPrompt,
+        strategy: fallbackStrategy,
+        confidence: 0.5,
+        reasoning: "Fallback prompt due to LLM generation error"
       };
     }
   }
 
-  return {
-    tone: 'contextual',
-    emphasis: ['complete the task', 'use available resources'],
-    examples: attemptNumber > 1,
-    contextLevel: hasContext ? 'extensive' : 'moderate'
-  };
-}
-  private async buildPrompt(
-  action: ModelDefinition,
-  context: ExecutionContext,
-  strategy: PromptStrategy,
-  examples: string[],
-  dependencyGraph?: any,
-  previousError?: string,
-  previousResponse?: string 
-): Promise<string> {
-  let prompt = '';
+  async generateHumanPrompt(
+    action: ModelDefinition,
+    context: PromptGenerationContext,
+    style: 'conversational' | 'business' | 'technical' | 'casual' = 'conversational',
+    tone: 'friendly' | 'professional' | 'direct' | 'enthusiastic' = 'friendly'
+  ): Promise<LLMPromptGenerationResponse> {
+    console.log(chalk.blue(`   🤖 Generating human-like prompt for: ${action.title}`));
 
-  const metadata = dependencyGraph?.nodes.find((n: any) => n.id === action._id);
-  const needsContext = metadata && metadata.requiresIds.length > 0;
+    const systemPrompt = this.buildSystemPrompt(context, style, tone);
+    const userPrompt = this.buildUserPrompt(action, context);
 
-  if (needsContext && context.availableIds && context.availableIds.size > 0) {
-    prompt = "**IMPORTANT CONTEXT FROM PREVIOUS ACTIONS:**\n";
-    for (const reqId of metadata.requiresIds) {
-      if (context.availableIds.has(reqId)) {
-        const values = context.availableIds.get(reqId)!;
-        const value = Array.isArray(values) ? values[0] : values;
-        prompt += `• ${reqId}: "${value}" (USE THIS - already created)\n`;
+    try {
+      const response = await trackLLMCall(
+        this.useClaudeForPrompting ? 'claude-sonnet-4-20250514' : 'gpt-4.1',
+        systemPrompt,
+        userPrompt,
+        'prompt-generator',
+        'generate-human-prompt',
+        async () => {
+          const result = await generateObject({
+            model: this.llmModel,
+            schema: PromptGenerationSchema,
+            system: systemPrompt,
+            prompt: userPrompt,
+            temperature: 0.7, 
+          });
+          return { result: result.object, outputText: JSON.stringify(result.object) };
+        }
+      );
+
+      console.log(chalk.green(`   ✅ Generated prompt: "${response.prompt.substring(0, 80)}..."`));
+      
+      return {
+        prompt: response.prompt,
+        confidence: response.confidence,
+        reasoning: response.reasoning,
+        alternativePrompts: response.alternativePrompts,
+        contextUsed: response.contextUsed,
+        suggestedTestData: response.suggestedTestData
+      };
+
+    } catch (error) {
+      console.error(chalk.red(`   ❌ Error generating prompt: ${error}`));
+      return this.generateFallbackPrompt(action, context);
+    }
+  }
+
+  private buildSystemPrompt(
+    context: PromptGenerationContext,
+    style: string,
+    tone: string
+  ): string {
+    const platform = context.platformContext.platform;
+    const useCase = context.platformContext.useCase;
+    
+    return `You are a real user of ${platform}, a ${useCase} platform. Generate natural prompts that actual users would type.
+
+CRITICAL CONTEXT AWARENESS:
+${this.buildContextSection(context)}
+
+PLATFORM KNOWLEDGE:
+- Platform: ${platform}
+- Use Case: ${useCase}
+- Business Context: ${context.platformContext.businessContext}
+- Terminology: ${this.getTerminologyString(platform)}
+
+STYLE GUIDELINES:
+- Style: ${style} (${this.getStyleDescription(style)})
+- Tone: ${tone} (${this.getToneDescription(tone)})
+
+PROMPT GENERATION RULES:
+1. Write like a REAL USER, not a tester or developer
+2. Use names from context (e.g., "Sarah" not "userId")
+3. Reference previous actions naturally ("the product we just created")
+4. Include realistic business scenarios
+5. Use platform-specific terminology naturally
+6. Make it conversational, like continuing a chat
+7. Don't mention technical IDs unless absolutely necessary
+8. Focus on business value, not technical operations
+
+EXAMPLES OF GOOD VS BAD PROMPTS:
+❌ Bad: "Execute GETMANY operation on products"
+✅ Good: "Show me all the products in my catalog"
+
+❌ Bad: "Create a user record with userId and email parameters"
+✅ Good: "Add Sarah Johnson from Marketing to my team with email sarah@company.com"
+
+❌ Bad: "Update record ID 12345 with new data"
+✅ Good: "Update Sarah's job title to Senior Marketing Manager"`;
+  }
+
+  private buildUserPrompt(
+    action: ModelDefinition,
+    context: PromptGenerationContext
+  ): string {
+    const dependencyInfo = this.buildDependencyInfo(context);
+    const conversationFlow = this.buildConversationFlow(context);
+    
+    return `Generate a natural user prompt for this action:
+
+ACTION TO PROMPT FOR:
+- Title: ${action.title}
+- Type: ${action.actionName}
+- Platform: ${action.connectionPlatform}
+- Model: ${action.modelName}
+
+${dependencyInfo}
+
+${conversationFlow}
+
+CONVERSATION CONTEXT:
+${context.conversationHistory.conversationFlow}
+
+REQUIREMENTS:
+- Use the available context naturally
+- Don't ask the user for data that's already available
+- Make it sound like a real user request
+- Include realistic business names and scenarios
+- Reference previous actions if relevant
+- Use conversational language
+
+Generate a prompt that a real ${context.platformContext.useCase} user would type.`;
+  }
+
+  private buildContextSection(context: PromptGenerationContext): string {
+    let section = "";
+    
+    if (context.executionContext.availableIds && context.executionContext.availableIds.size > 0) {
+      section += "AVAILABLE RESOURCES (use these, don't ask for them):\n";
+      for (const [key, values] of context.executionContext.availableIds.entries()) {
+        const idList = Array.isArray(values) ? values : [values];
+        section += `- ${key}: "${idList[0]}" (already exists)\n`;
       }
     }
 
-    if (action._id && previousError && 
-        (previousError.includes('403') || previousError.includes('permission'))) {
-      prompt = "⚠️ **PERMISSION ERROR DETECTED**\n" +
-        "This action previously failed due to insufficient permissions or scopes.\n" +
-        "The connector may need additional OAuth scopes to perform this action.\n\n" + prompt;
+    if (context.executionContext.availableNames && context.executionContext.availableNames.size > 0) {
+      section += "\nAVAILABLE NAMES (prefer these over IDs):\n";
+      for (const [key, name] of context.executionContext.availableNames.entries()) {
+        section += `- ${key}: "${name}"\n`;
+      }
     }
-    
-    prompt += "\n";
-  }
 
-  const isCreateWithNoContext = action.actionName.toLowerCase().includes('create') && 
-    (!context.availableIds || context.availableIds.size === 0);
-
-  if (isCreateWithNoContext) {
-    const resourceName = extractResourceFromTitle(action.title);
-    prompt += `Create a ${resourceName}. `;
-    prompt += `IMPORTANT: If you need values like userId, emails, or other IDs:\n`;
-    prompt += `1. First try to retrieve them from the system (e.g., list existing users)\n`;
-    prompt += `2. If you can't retrieve them, ask Pica to help you obtain the data\n`;
-    prompt += `3. Only use test values as a last resort\n`;
-    prompt += `Remember: Real data from the system is always preferred over generated test data.\n\n`;
-  } else {
-    switch (strategy.tone) {
-      case 'conversational':
-        prompt += this.getConversationalOpening(action, context);
-        break;
-      case 'step-by-step':
-        prompt += this.getStepByStepOpening(action, context);
-        break;
-      case 'technical':
-        prompt += this.getTechnicalOpening(action, context);
-        break;
-      case 'contextual':
-        prompt += this.getContextualOpening(action, context);
-        break;
+    if (context.conversationHistory.previousPrompts.length > 0) {
+      section += "\nRECENT USER ACTIONS:\n";
+      const recentPrompts = context.conversationHistory.previousPrompts.slice(-3);
+      recentPrompts.forEach((prompt, index) => {
+        section += `${index + 1}. "${prompt}"\n`;
+      });
     }
+
+    return section;
   }
 
-  if (strategy.contextLevel !== 'minimal' && context.availableIds && context.availableIds.size > 0) {
-    prompt += this.buildContextSection(action, context, strategy.contextLevel);
-  }
+  private buildDependencyInfo(context: PromptGenerationContext): string {
+    const deps = context.dependencies;
+    let info = "";
 
-  if (strategy.emphasis.length > 0) {
-    prompt += '\n\nKey points to remember:\n';
-    strategy.emphasis.forEach(point => {
-      prompt += `• ${point}\n`;
-    });
-  }
-
-  if (strategy.contextLevel !== 'minimal') {
-    prompt += this.buildPathSection(action, context);
-  }
-
-  if (strategy.examples && examples.length > 0) {
-    prompt += '\n\nHere are some examples that worked well:\n';
-    examples.forEach(example => {
-      prompt += `• ${example}\n`;
-    });
-  }
-
-  if (dependencyGraph) {
-    const metadata = dependencyGraph.nodes.find((n: any) => n.id === action._id);
-    if (metadata && metadata.dependsOn.length > 0) {
-      prompt += '\n\nThis action depends on previous actions that should have provided:\n';
-      metadata.requiresIds.forEach((id: string) => {
-        const hasId = context.availableIds.has(id) && context.availableIds.get(id)!.length > 0;
-        if (hasId) {
-          const value = context.availableIds.get(id)![0];
-          prompt += `• ${id}: "${value}" (available in context - use this!)\n`;
+    if (deps.requiredIds.length > 0) {
+      info += "DEPENDENCIES:\n";
+      deps.requiredIds.forEach(reqId => {
+        if (context.executionContext.availableIds?.has(reqId)) {
+          const value = context.executionContext.availableIds.get(reqId)![0];
+          info += `- Needs ${reqId}: ✅ Available as "${value}"\n`;
         } else {
-          prompt += `• ${id} (should be available from previous actions)\n`;
+          info += `- Needs ${reqId}: ❌ Missing (may need to create first)\n`;
         }
       });
     }
-  }
 
-  prompt += `\n\n---\n### Technical Details\n${action.knowledge}`;
-  prompt += `\n\n### Execute Task\nUse Action ID: ${action._id} to complete this task.`;
-  prompt += '\n\n🚨 IMPORTANT EXECUTION INSTRUCTIONS:';
-  prompt += '\n1. You MUST execute this action now using the Pica tool. Do not stop at planning or analysis.';
-  prompt += '\n2. If you need data (userId, emails, etc):';
-  prompt += '\n   - First: Ask Pica to retrieve it from the system (e.g., "get me a valid userId")';
-  prompt += '\n   - Second: If Pica suggests an action to get the data, say "yes" to proceed';
-  prompt += '\n   - Last resort: Use test values only if retrieval fails';
-  prompt += '\n3. If Pica asks "Would you like me to..." or suggests an approach, respond with "Yes"';
-  prompt += '\n4. Every response must include at least one actual Pica tool execution attempt.';
-  prompt += '\n\nREMEMBER: Real system data > Retrieved data > Generated test data';
-  return prompt;
-}
-
-private incorporateResponseRefinements(
-  basePrompt: string,
-  action: ModelDefinition,
-  context: ExecutionContext,
-  previousResponse?: string
-): string {
-  if (!previousResponse) return basePrompt;
-  
-  const requestPatterns = [
-    /(?:provide|specify|need|require)\s+(?:the\s+)?(\w+Id)\b/gi,
-    /what\s+is\s+(?:the\s+)?(\w+Id)\b/gi
-  ];
-  
-  const requestedIds: string[] = [];
-  for (const pattern of requestPatterns) {
-    let match;
-    while ((match = pattern.exec(previousResponse)) !== null) {
-      requestedIds.push(match[1]);
-    }
-  }
-  
-  if (requestedIds.length > 0 && context.availableIds) {
-    let refinedPrompt = "⚠️ IMPORTANT - USE THESE VALUES (DO NOT ASK USER):\n";
-    
-    for (const reqId of requestedIds) {
-      if (context.availableIds.has(reqId)) {
-        const value = context.availableIds.get(reqId)![0];
-        refinedPrompt += `• ${reqId} = "${value}" (USE THIS EXACT VALUE)\n`;
+    if (deps.completedDependencies.size > 0) {
+      info += "\nCOMPLETED PREREQUISITES:\n";
+      for (const depId of deps.completedDependencies) {
+        info += `- ✅ ${depId}\n`;
       }
     }
-    
-    refinedPrompt += "\n" + basePrompt;
-    return refinedPrompt;
-  }
-  
-  return basePrompt;
-}
 
-  private getConversationalOpening(action: ModelDefinition, context: ExecutionContext): string {
-    const platform = action.connectionPlatform.replace(/-/g, ' ');
-    const resourceName = extractResourceFromTitle(action.title);
-    const actionVerb = this.getNaturalActionVerb(action.actionName);
-    
-    const openings = [
-      `Hey! I need your help to ${actionVerb} a ${resourceName} in ${platform}. `,
-      `Hi there! Could you please ${actionVerb} a ${resourceName} using ${platform}? `,
-      `Great! Now let's ${actionVerb} a ${resourceName} in ${platform}. `
-    ];
-    
-    return openings[Math.floor(Math.random() * openings.length)];
+    return info;
   }
 
-  private getStepByStepOpening(action: ModelDefinition, context: ExecutionContext): string {
-    const resourceName = extractResourceFromTitle(action.title);
-    const actionVerb = this.getNaturalActionVerb(action.actionName);
-    
-    return `Let's carefully ${actionVerb} a ${resourceName} step by step:\n\n` +
-           `Step 1: Check if we have all required information\n` +
-           `Step 2: Use the correct action with proper parameters\n` +
-           `Step 3: Verify the operation completed successfully\n\n`;
-  }
-
-  private getTechnicalOpening(action: ModelDefinition, context: ExecutionContext): string {
-    const resourceName = extractResourceFromTitle(action.title);
-    return `Execute ${action.actionName.toUpperCase()} operation on ${resourceName} via ${action.connectionPlatform}. `;
-  }
-
-  private getContextualOpening(action: ModelDefinition, context: ExecutionContext): string {
-    const resourceName = extractResourceFromTitle(action.title);
-    const actionVerb = this.getNaturalActionVerb(action.actionName);
-    const recentSuccess = context.recentActions.filter(a => a.success).slice(-1)[0];
-    
-    const hasRelevantNames = context.availableNames && context.availableNames.size > 0;
-    
-    if (recentSuccess && hasRelevantNames) {
-      const nameHint = Array.from(context.availableNames.values())[0];
-      return `Following up on the ${recentSuccess.actionTitle}, now we need to ${actionVerb} the ${resourceName} named "${nameHint}". Use the name when possible, not technical IDs. `;
-    } else if (recentSuccess) {
-      return `Following up on the ${recentSuccess.actionTitle}, now we need to ${actionVerb} the ${resourceName}. `;
-    }
-    return `For our testing workflow, please ${actionVerb} a ${resourceName} in ${action.connectionPlatform}. Use human-readable names when possible. `;
-  }
-
-  private buildContextSection(
-  action: ModelDefinition, 
-  context: ExecutionContext, 
-  level: 'moderate' | 'extensive'
-): string {
-  let section = '\n\n📋 Session Context (Important - each request is a new chat):\n';
-  
-  if (context.availableIds && context.availableIds.size > 0) {
-    section += 'IDs from previous actions in this testing session:\n';
-    if (context.availableNames && context.availableNames.size > 0) {
-      section += 'Resource names (use these for user-friendly operations):\n';
-      for (const [idType, name] of context.availableNames.entries()) {
-        section += `• ${idType.replace('Id', 'Name')}: "${name}" - PREFER THIS for operations\n`;
-      }
-      section += '\n';
+  private buildConversationFlow(context: PromptGenerationContext): string {
+    const history = context.conversationHistory;
+    if (history.previousPrompts.length === 0) {
+      return "CONVERSATION FLOW: This is the first action in the sequence.";
     }
 
-    section += 'Technical IDs (use only if names don\'t work):\n';
-        for (const [type, ids] of context.availableIds.entries()) {
-          const idList = Array.isArray(ids) ? ids : [ids];
-          section += `• ${type}: "${idList[0]}" - USE THIS DIRECTLY, it already exists\n`;
-          if (idList.length > 1) {
-            section += `  Additional ${type}s: ${idList.slice(1).map(id => `"${id}"`).join(', ')}\n`;
-          }
-        }
-        section += '\nThese resources were created in earlier actions. You should use these IDs directly without creating new ones.\n';
-      }
-  
-  if (level === 'extensive') {
-    if (context.createdResources && context.createdResources.size > 0) {
-      section += '\nResources created in this session:\n';
-      for (const [key, resource] of context.createdResources.entries()) {
-        section += `• ${key}`;
-        if (typeof resource === 'object' && resource !== null && resource.id) {
-          section += ` (ID: ${resource.id})`;
-        }
-        section += '\n';
-      }
-    }
-    
-    const recentSuccesses = context.recentActions.filter(a => a.success).slice(-3);
-    if (recentSuccesses.length > 0) {
-      section += '\nWhat happened in recent actions:\n';
-      recentSuccesses.forEach((action, idx) => {
-        section += `${idx + 1}. ${action.actionTitle} - Completed successfully`;
-        if (action.output && typeof action.output === 'string') {
-          const idMatch = action.output.match(/"id"\s*:\s*"([^"]+)"/);
-          if (idMatch) {
-            section += ` (created ID: ${idMatch[1]})`;
-          }
-        }
-        section += '\n';
-      });
-    }
+    return `CONVERSATION FLOW: 
+Previous actions: ${history.previousPrompts.length}
+Last prompt: "${history.previousPrompts[history.previousPrompts.length - 1]}"
+Flow: ${history.conversationFlow}`;
   }
-  
-  return section;
-}
 
-private buildPathSection(action: ModelDefinition, context: ExecutionContext): string {
-  const { resolvedPath, missingParams } = PathParameterResolver.resolvePath(
-    action.path, 
-    context, 
-    context.availableIds ? Object.fromEntries(context.availableIds) : undefined
-  );
-  
-  let section = '';
-  
-  if (missingParams.length > 0) {
-    section += `\n\n⚠️ CRITICAL: Missing required parameters for this action:\n`;
-    missingParams.forEach(param => {
-      section += `• ${param} - `;
-      if (context.availableIds) {
-        const similarParams = Array.from(context.availableIds.keys())
-          .filter(key => key.toLowerCase().includes(param.toLowerCase()) || 
-                        param.toLowerCase().includes(key.toLowerCase()));
-        if (similarParams.length > 0) {
-          const value = context.availableIds.get(similarParams[0]);
-          section += `Use "${value}" from context\n`;
-        } else {
-          section += `Need to create or find this resource first\n`;
-        }
-      } else {
-        section += `Need to create or find this resource first\n`;
-      }
-    });
-  } else if (resolvedPath !== action.path) {
-    section += `\n\n✅ Using resolved path: ${resolvedPath}\n`;
-  }
-  
-  return section;
-}
-  private getRelevantExamples(action: ModelDefinition, context: ExecutionContext): string[] {
-    const examples: string[] = [];
-    const platform = action.connectionPlatform.toLowerCase();
-    const resourceName = extractResourceFromTitle(action.title);
+  private generateFallbackPrompt(
+    action: ModelDefinition,
+    context: PromptGenerationContext
+  ): LLMPromptGenerationResponse {
     const actionName = action.actionName.toLowerCase();
+    const modelName = action.modelName.toLowerCase();
+    const platform = context.platformContext.platform;
+    
+    let prompt = "";
     
     if (actionName.includes('create')) {
-      if (platform.includes('google') && resourceName.includes('doc')) {
-        examples.push('Title: "Q4 2024 Strategic Planning Document"');
-      } else if (platform.includes('sheet') || platform.includes('excel')) {
-        examples.push('Title: "Sales Analysis - December 2024"');
-      } else if (platform.includes('email')) {
-        examples.push('Subject: "Project Update - Testing Framework Progress"');
-      } else if (platform.includes('linear')) {
-        if (resourceName.includes('issue')) {
-          examples.push('Title: "Fix login authentication bug"');
-        } else if (resourceName.includes('project')) {
-          examples.push('Name: "Q1 2025 Product Roadmap"');
-        } else if (resourceName.includes('cycle')) {
-          examples.push('Name: "Sprint 23 - Authentication Improvements"');
-        }
-      }
+      prompt = `Create a new ${modelName} in ${platform}`;
+    } else if (actionName.includes('list') || actionName.includes('get')) {
+      prompt = `Show me my ${modelName}s`;
     } else if (actionName.includes('update')) {
-      examples.push('Add today\'s date to show the update worked');
-      examples.push('Append " - Updated" to the title or name');
+      prompt = `Update the ${modelName}`;
+    } else if (actionName.includes('delete')) {
+      prompt = `Delete the ${modelName}`;
+    } else {
+      prompt = `Help me with ${action.title.toLowerCase()}`;
     }
+
+    if (context.executionContext.availableNames?.size > 0) {
+      const firstName = Array.from(context.executionContext.availableNames.values())[0];
+      prompt += ` for ${firstName}`;
+    }
+
+    return {
+      prompt,
+      confidence: 0.5,
+      reasoning: "Fallback prompt generated due to LLM failure",
+      alternativePrompts: [prompt],
+      contextUsed: [],
+      suggestedTestData: {}
+    };
+  }
+
+  private getStyleDescription(style: string): string {
+    const descriptions = {
+      conversational: "Natural, flowing dialogue",
+      business: "Professional but approachable",
+      technical: "Precise and specific",
+      casual: "Relaxed and informal"
+    };
+    return descriptions[style as keyof typeof descriptions] || "conversational";
+  }
+
+  private getToneDescription(tone: string): string {
+    const descriptions = {
+      friendly: "Warm and personable",
+      professional: "Businesslike and formal",
+      direct: "Straight to the point",
+      enthusiastic: "Energetic and positive"
+    };
+    return descriptions[tone as keyof typeof descriptions] || "friendly";
+  }
+
+  private initializePlatformTerminology(): void {
+    this.platformTerminology.set('hubspot', new Map([
+      ['contact', 'contact'],
+      ['deal', 'deal'],
+      ['company', 'company'],
+      ['ticket', 'support ticket'],
+      ['task', 'task'],
+      ['note', 'note'],
+      ['email', 'email'],
+      ['meeting', 'meeting']
+    ]));
+
+    this.platformTerminology.set('linear', new Map([
+      ['issue', 'issue'],
+      ['project', 'project'],
+      ['team', 'team'],
+      ['cycle', 'cycle'],
+      ['comment', 'comment'],
+      ['label', 'label']
+    ]));
+
+    this.platformTerminology.set('attio', new Map([
+      ['person', 'person'],
+      ['company', 'company'],
+      ['deal', 'deal'],
+      ['note', 'note'],
+      ['task', 'task'],
+      ['list', 'list'],
+      ['workspace', 'workspace']
+    ]));
+
+    this.platformTerminology.set('ecommerce', new Map([
+      ['product', 'product'],
+      ['cart', 'shopping cart'],
+      ['order', 'order'],
+      ['customer', 'customer'],
+      ['inventory', 'inventory'],
+      ['payment', 'payment']
+    ]));
+  }
+
+  private getTerminologyString(platform: string): string {
+    const terminology = this.platformTerminology.get(platform.toLowerCase()) || new Map();
+    return Array.from(terminology.entries())
+      .map(([key, value]) => `${key} → ${value}`)
+      .join(', ');
+  }
+
+  recordPromptSuccess(
+    prompt: string,
+    action: ModelDefinition,
+    context: PromptGenerationContext,
+    executionTime: number
+  ): void {
+    this.learningData.push({
+      prompt,
+      action,
+      context,
+      success: true,
+      executionTime,
+      timestamp: Date.now()
+    });
     
-    return examples.slice(0, 2); 
+    this.updatePromptPatterns(prompt, action, true);
+  }
+
+  recordPromptFailure(
+    prompt: string,
+    action: ModelDefinition,
+    context: PromptGenerationContext,
+    error: string,
+    agentResponse?: string
+  ): void {
+    this.learningData.push({
+      prompt,
+      action,
+      context,
+      success: false,
+      error,
+      agentResponse,
+      executionTime: 0,
+      timestamp: Date.now()
+    });
+    
+    this.updatePromptPatterns(prompt, action, false);
+  }
+
+  private updatePromptPatterns(
+    prompt: string,
+    action: ModelDefinition,
+    success: boolean
+  ): void {
+    const words = prompt.toLowerCase().split(/\s+/);
+    const pattern = words.slice(0, 3).join(' '); 
+    
+    if (!this.promptPatterns.has(pattern)) {
+      this.promptPatterns.set(pattern, {
+        pattern,
+        successRate: success ? 1 : 0,
+        platforms: [action.connectionPlatform],
+        actionTypes: [action.actionName],
+        contextRequirements: [],
+        examples: [prompt]
+      });
+    } else {
+      const existing = this.promptPatterns.get(pattern)!;
+      const totalAttempts = existing.examples.length;
+      const successCount = Math.round(existing.successRate * totalAttempts) + (success ? 1 : 0);
+      
+      existing.successRate = successCount / (totalAttempts + 1);
+      existing.examples.push(prompt);
+      
+      if (!existing.platforms.includes(action.connectionPlatform)) {
+        existing.platforms.push(action.connectionPlatform);
+      }
+      if (!existing.actionTypes.includes(action.actionName)) {
+        existing.actionTypes.push(action.actionName);
+      }
+    }
+  }
+
+  getSuccessfulPatterns(): PromptPattern[] {
+    return Array.from(this.promptPatterns.values())
+      .filter(pattern => pattern.successRate > 0.7)
+      .sort((a, b) => b.successRate - a.successRate);
+  }
+
+  getFailureAnalysis(): { commonFailures: string[], suggestions: string[] } {
+    const failures = this.learningData.filter(d => !d.success);
+    const commonFailures = failures
+      .map(f => f.error || 'Unknown error')
+      .reduce((acc, error) => {
+        acc[error] = (acc[error] || 0) + 1;
+        return acc;
+      }, {} as Record<string, number>);
+
+    return {
+      commonFailures: Object.entries(commonFailures)
+        .sort(([,a], [,b]) => b - a)
+        .slice(0, 5)
+        .map(([error, count]) => `${error} (${count} times)`),
+      suggestions: [
+        "Use more specific context references",
+        "Include realistic business names",
+        "Reference previous actions naturally",
+        "Use platform-specific terminology"
+      ]
+    };
   }
 
   recordPromptResult(actionId: string, prompt: string, success: boolean): void {
@@ -468,5 +543,62 @@ private buildPathSection(action: ModelDefinition, context: ExecutionContext): st
     this.promptHistory.set(actionId, history);
   }
 
-  
+  recordLLMPromptResult(
+    action: ModelDefinition,
+    prompt: string,
+    success: boolean,
+    error?: string,
+    agentResponse?: string,
+    context?: ExecutionContext
+  ): void {
+    this.recordPromptResult(action._id, prompt, success);
+    
+    if (context) {
+      const promptContext: PromptGenerationContext = {
+        executionContext: context,
+        dependencies: {
+          graph: null,
+          currentAction: action,
+          completedDependencies: new Set(),
+          availableResources: new Map(),
+          requiredIds: [],
+          providedIds: []
+        },
+        conversationHistory: {
+          previousPrompts: [],
+          previousResponses: [],
+          extractedData: [],
+          conversationFlow: ""
+        },
+        platformContext: {
+          platform: action.connectionPlatform,
+          terminology: new Map(),
+          useCase: "unknown",
+          scenario: "unknown",
+          businessContext: ""
+        },
+        metadata: {
+          attemptNumber: 1,
+          isRetry: false,
+          totalActionsInSequence: 1,
+          currentActionIndex: 0
+        }
+      };
+
+      if (success) {
+        this.recordPromptSuccess(prompt, action, promptContext, 0);
+      } else {
+        this.recordPromptFailure(prompt, action, promptContext, error || 'Unknown error', agentResponse);
+      }
+    }
+  }
+  getLLMPromptInsights(): { successfulPatterns: any[], failureAnalysis: any } {
+    return {
+      successfulPatterns: this.getSuccessfulPatterns(),
+      failureAnalysis: this.getFailureAnalysis()
+    };
+  }
+  resetForNewPlatform(): void {
+    this.enhancedContextManager.reset();
+  }
 }

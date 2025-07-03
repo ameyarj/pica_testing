@@ -2,9 +2,8 @@ import { openai } from "@ai-sdk/openai";
 import { anthropic } from "@ai-sdk/anthropic";
 import { generateText, generateObject, LanguageModel } from "ai";
 import { z } from 'zod';
-import { ModelDefinition, ExecutionContext } from './interface';
+import { ModelDefinition, ExecutionContext} from './interface';
 import { EnhancedModelSelector } from './enhanced_model_selector';
-import { tokenTracker } from './global_token_tracker';
 import { initializeModel } from './utils/modelInitializer';
 import { trackLLMCall } from './utils/tokenTrackerUtils';
 
@@ -143,36 +142,38 @@ Identify:
       responseAnalysis = await this.analyzeAgentResponse(agentResponse, actionDetails, context);
     }
 
-    const systemPrompt = `You are an expert at fixing API action failures. You analyze errors and agent responses to provide GENERIC fixes that work for any similar prompts.
+    const systemPrompt = `You are an expert at creating GENERIC knowledge refinements for API actions. Your refinements must work for millions of different users with different prompts and contexts.
+
+CRITICAL RULES FOR GENERIC REFINEMENTS:
+1. **NO SPECIFIC VALUES**: Never include specific IDs, names, emails, or other user data
+2. **USE PLACEHOLDERS**: Replace specific values with generic placeholders like {contextId}, {userName}, {resourceName}
+3. **PATTERN-BASED FIXES**: Focus on structural patterns, not specific errors
+4. **UNIVERSAL APPLICABILITY**: Refinements must work regardless of the user's prompt or context
 
 ANALYSIS FOCUS:
-1. **Agent Behavior**: If the agent asked for parameters that were in context, the prompt needs to be more explicit
-2. **Missing Context Usage**: If error mentions "missing" but context has that data, make the prompt emphasize using context
-3. **Parameter Clarity**: If agent misunderstood what parameters to use, clarify in both knowledge and prompt
-4. **Response Analysis**: Use the agent's actual response to understand what went wrong
-5. **Make Fixes Generic**: Fixes should work for any prompt, not just the specific one that failed
+1. **Parameter Placement Issues**: Fix where parameters should go (path vs query vs body)
+2. **Context Usage Patterns**: Create generic instructions for using available context
+3. **Data Format Issues**: Fix JSON structure, data types, required fields
+4. **API Call Structure**: Clarify how to construct proper API requests
+5. **Common Failure Patterns**: Address recurring issues across different scenarios
 
-PROMPT REFINEMENT RULES:
-- If agent asked user for data that were in context, create explicit instructions to use those IDs and data
-- Add concrete examples using actual context values
-- Make parameter usage crystal clear
-- Tell agent to retrieve required data from system if not in context
+GENERIC REFINEMENT RULES:
+- Replace all specific IDs/values with placeholders: {contextId}, {userId}, {resourceId}
+- Use generic examples: "user@example.com" instead of real emails
+- Focus on parameter placement rules: "IDs go in path parameters, not request body"
+- Add universal validation rules: "ensure required fields are present"
+- Create fallback instructions: "if context missing, use system defaults"
+- Emphasize data type correctness: "numbers as integers, not strings"
+- Include universal error handling patterns
 
-KNOWLEDGE REFINEMENT RULES:
-- Keep the original structure but add clarifications
-- If IDs are available in context, explicitly mention to use them
-- Add examples of valid data formats if format errors occurred
-- Include fallback instructions for edge cases
-- Fix path, if any issues in the path in the definition
-- Fix data structure of json object so that the AI understands better
-- Motivate the AI to actually send query and path params in their respective params instead of json body
-- Ensure to send id in the path parameter not in the json body
-- Ensure to send id in the query parameter not in the json body
-- Add clear parameter placement instructions (path vs query vs body)
-- Include working examples of the API call structure
-- Make refinements generic enough to work with different prompts
-- Focus on structural clarity over specific error fixes
-`;
+KNOWLEDGE STRUCTURE IMPROVEMENTS:
+- Add parameter placement section: "Path Parameters: {id}", "Query Parameters: {filter}", "Body: {data}"
+- Include data format examples with placeholders
+- Add validation rules that work universally
+- Focus on API contract compliance
+- Provide generic troubleshooting steps
+
+Remember: Your refinements will be used by millions of users. Make them universally applicable!`;
 
 
     const contextInfo = this.buildDetailedContextInfo(context);
@@ -214,22 +215,21 @@ Provide specific refinements to fix this error. Focus on making the prompt use c
       anthropic("claude-sonnet-4-20250514") : 
       openai(modelToUse);
 
-    const inputTokens = tokenTracker.estimateTokens(systemPrompt + userPrompt);
-    
-    const { object: refinement } = await generateObject({
-      model,
-      schema: RefinementSchema,
-      system: systemPrompt,
-      prompt: userPrompt,
-    });
-    
-    const outputTokens = tokenTracker.estimateTokens(JSON.stringify(refinement));
-    tokenTracker.trackUsage(
+    const refinement = await trackLLMCall(
       modelToUse,
-      inputTokens,
-      outputTokens,
+      systemPrompt,
+      userPrompt,
       'knowledge-refiner',
-      'refine-knowledge'
+      'refine-knowledge',
+      async () => {
+        const result = await generateObject({
+          model,
+          schema: RefinementSchema,
+          system: systemPrompt,
+          prompt: userPrompt,
+        });
+        return { result: result.object, outputText: JSON.stringify(result.object) };
+      }
     );
 
     let promptStrategy = refinement.promptStrategy;
@@ -257,8 +257,10 @@ ${promptStrategy || 'Execute the action using the above values directly.'}`;
       });
     }
 
+    const generalizedKnowledge = enhancedKnowledge ? this.generalizeRefinedKnowledge(enhancedKnowledge, context) : undefined;
+
     return {
-      knowledge: enhancedKnowledge?.trim() || undefined,
+      knowledge: generalizedKnowledge?.trim() || undefined,
       promptStrategy: promptStrategy?.trim() || undefined,
       contextMapping: refinement.contextMapping
     };
@@ -268,6 +270,51 @@ ${promptStrategy || 'Execute the action using the above values directly.'}`;
     return this.createFallbackRefinement(errorMessage, actionDetails, context);
   }
 }
+
+  private generalizeRefinedKnowledge(knowledge: string, context?: ExecutionContext): string {
+    let generalized = knowledge;
+
+    if (context?.availableIds) {
+      for (const [type, ids] of context.availableIds.entries()) {
+        const idList = Array.isArray(ids) ? ids : [ids];
+        for (const id of idList) {
+          const regex = new RegExp(`"${id}"`, 'g');
+          generalized = generalized.replace(regex, `"{${type}}"`);
+          
+          const regexNoQuotes = new RegExp(`\\b${id}\\b`, 'g');
+          generalized = generalized.replace(regexNoQuotes, `{${type}}`);
+        }
+      }
+    }
+
+    if (context?.availableNames) {
+      for (const [type, name] of context.availableNames.entries()) {
+        const regex = new RegExp(`"${name}"`, 'g');
+        generalized = generalized.replace(regex, `"{${type}}"`);
+        
+        const regexNoQuotes = new RegExp(`\\b${name}\\b`, 'g');
+        generalized = generalized.replace(regexNoQuotes, `{${type}}`);
+      }
+    }
+
+    generalized = generalized
+      .replace(/[\w\.-]+@[\w\.-]+\.\w+/g, 'user@example.com')
+      .replace(/\+?\d{1,3}[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{4}/g, '+1-555-0123')
+      .replace(/https?:\/\/(?!.*\{)[^\s"]+/g, 'https://api.example.com/endpoint')
+      .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[\.\d]*Z?/g, '2024-01-01T12:00:00Z')
+      .replace(/"(\d{6,})"/g, '"{contextId}"')
+      .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '{uuid}');
+
+    if (!generalized.includes('Parameter Placement') && !generalized.includes('contextId')) {
+      generalized += '\n\n## Parameter Usage Guidelines\n';
+      generalized += '- Use IDs from context: {contextId}, {userId}, {resourceId}\n';
+      generalized += '- Path parameters: Place IDs in URL path segments\n';
+      generalized += '- Query parameters: Use for filters and options\n';
+      generalized += '- Request body: Include data payload, not IDs\n';
+    }
+
+    return generalized;
+  }
 
   private analyzeErrorType(errorMessage: string): { type: string; details: string[] } {
     const error = errorMessage.toLowerCase();
