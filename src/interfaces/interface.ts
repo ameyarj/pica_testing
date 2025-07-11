@@ -239,3 +239,17 @@ export interface RefinedKnowledge {
   confidence: number;
   reasoning: string;
 }
+
+export interface BatchSelection {
+  type: 'all' | 'continue' | 'range' | 'custom';
+  startIndex?: number;
+  endIndex?: number;
+  actionIds?: string[];
+}
+
+export interface BatchMetadata {
+  batchNumber: number;
+  actionRange: string;
+  totalBatches: number;
+  previousBatches: number[];
+}

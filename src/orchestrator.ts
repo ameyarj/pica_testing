@@ -4,9 +4,11 @@ import { KnowledgeRefiner } from './knowledge_refiner';
 import { EnhancedContextManager } from './enhanced_context_manager';
 import { EnhancedDependencyAnalyzer } from './dependency_analyzer';
 import { EnhancedPromptGenerator } from './prompt_generator';
-import { ConnectionDefinition, ModelDefinition, ActionResult, ExecutionContext } from './interface';
+import { ConnectionDefinition, ModelDefinition, ActionResult, ExecutionContext } from './interfaces/interface';
 import { PathParameterResolver } from './path_resolver';
 import { ExecutionLogger } from './execution_logger';
+import { BatchManager, ActionSelection, BatchStrategy } from './batch_manager';
+import { TestingHistoryManager } from './testing_history_manager';
 import readline from 'readline/promises';
 import chalk from 'chalk';
 import * as diff from 'diff';
@@ -24,7 +26,6 @@ interface EnhancedActionResult extends ActionResult {
   dependenciesMet: boolean;
   analysisReason?: string;
 }
-
 export class EnhancedPicaosTestingOrchestrator {
   private picaApiService: PicaApiService;
   private agentService: EnhancedAgentService;
@@ -36,7 +37,25 @@ export class EnhancedPicaosTestingOrchestrator {
   private useClaudeModels: boolean = true;
   private logger: ExecutionLogger | undefined;
   private permissionFailedActions: Set<string> = new Set();
-  private useLLMPrompts: boolean = true; // Flag to enable new LLM-based prompts
+  private useLLMPrompts: boolean = true; 
+  private batchManager: BatchManager;
+  private historyManager: TestingHistoryManager;
+  private currentExecutionState: {
+    platform: string;
+    batchNumber: number;
+    actionRange: string;
+    currentActionIndex: number;
+    executedActions: Array<{
+      actionId: string;
+      actionTitle: string;
+      prompt: string;
+      output: string;
+      success: boolean;
+      extractedData?: any;
+    }>;
+    availableResources: {[key: string]: string[]};
+    startTime: number;
+  } | null = null;
 
   constructor(picaSdkSecretKey: string, openAIApiKey: string) {
     this.picaApiService = new PicaApiService(picaSdkSecretKey);
@@ -45,6 +64,8 @@ export class EnhancedPicaosTestingOrchestrator {
     this.contextManager = new EnhancedContextManager(this.useClaudeModels);
     this.dependencyAnalyzer = new EnhancedDependencyAnalyzer(this.useClaudeModels);
     this.promptGenerator = new EnhancedPromptGenerator(this.useClaudeModels);
+    this.batchManager = new BatchManager(this.useClaudeModels);
+    this.historyManager = new TestingHistoryManager();
   }
 
   public async start(): Promise<void> {
@@ -99,38 +120,446 @@ export class EnhancedPicaosTestingOrchestrator {
 
   private async testPlatform(connection: ConnectionDefinition): Promise<void> {
   let modelDefinitions = await this.picaApiService.getModelDefinitions(connection._id);
-
   modelDefinitions = modelDefinitions.filter(action => action.supported !== false);
+  
   console.log(chalk.bold(`\n📋 Found ${modelDefinitions.length} supported actions for ${connection.name}`));
-
-  console.log(chalk.bold(`\n📋 Found ${modelDefinitions.length} actions for ${connection.name}`));
+  
   if (!this.logger) {
     this.logger = new ExecutionLogger(connection.name);
     this.agentService.setLogger(this.logger);
   }
 
-  this.contextManager.reset();
+  this.historyManager.displayHistory(connection.name);
 
-  console.log(chalk.cyan("\n🧩 Analyzing action dependencies..."));
-  const dependencyGraph = await this.dependencyAnalyzer.analyzeDependencies(
-    modelDefinitions,
-    connection.name
+  const { selection, strategy } = await this.getBatchSelection(connection.name, modelDefinitions);
+  
+  if (this.logger) {
+    const range = this.formatRange(selection, strategy.selectedActions.length);
+    const estimatedBatches = Math.ceil(strategy.selectedActions.length / (selection.batchSize || 75));
+    this.logger.setBatchMetadata(strategy.batchNumber, range, estimatedBatches);
+    console.log(chalk.blue(`   📊 Logger configured for batch ${strategy.batchNumber}: ${range}`));
+  }
+  
+  if (strategy.needsContext) {
+    console.log(chalk.blue(`\n🔄 Loading context from ${strategy.requiredBatches.length} previous batches...`));
+    const loadedContext = await this.batchManager.loadRequiredContext(connection.name, strategy.requiredBatches);
+    this.contextManager = new EnhancedContextManager(this.useClaudeModels);
+    this.contextManager.mergeContext(loadedContext);
+  } else {
+    this.contextManager.reset();
+  }
+
+  const startTime = Date.now();
+  const results = await this.executeBatch(connection, strategy, modelDefinitions);
+  const duration = Date.now() - startTime;
+
+  const context = this.contextManager.getContext();
+  const range = this.formatRange(selection, strategy.selectedActions.length);
+  
+  const refinedKnowledge = new Map<string, string>();
+  const promptPatterns = new Map<string, any>();
+  
+  results.forEach(result => {
+    if (result.finalKnowledge && result.finalKnowledge !== result.originalKnowledge) {
+      refinedKnowledge.set(result.actionId || result.actionTitle, result.finalKnowledge);
+    }
+    if (result.strategyUsed) {
+      promptPatterns.set(result.actionId || result.actionTitle, result.strategyUsed);
+    }
+  });
+  
+  this.batchManager.saveBatchResults(
+    connection.name,
+    strategy.batchNumber,
+    range,
+    results,
+    context,
+    duration,
+    refinedKnowledge,
+    promptPatterns
   );
+  
+  console.log(chalk.bold.green(`\n✅ Batch ${strategy.batchNumber} completed in ${this.formatDuration(duration)}`));
+}
 
-  const sortedActions = this.dependencyAnalyzer.getSortedActions(dependencyGraph, modelDefinitions);
-  this.displayExecutionPlan(sortedActions, dependencyGraph);
+private async getBatchSelection(platform: string, allActions: ModelDefinition[]): Promise<{ selection: ActionSelection; strategy: BatchStrategy }> {
+  const interruptedBatch = this.historyManager.hasInterruptedBatch(platform);
+  
+  if (interruptedBatch.canResume) {
+    console.log(chalk.yellow(`\n⚠️ Found interrupted batch ${interruptedBatch.batchInfo.batchNumber}`));
+    console.log(chalk.yellow(`   Last executed action: ${interruptedBatch.batchInfo.interruptedAt}`));
+    console.log(chalk.yellow(`   Range: ${interruptedBatch.batchInfo.range}`));
+    console.log(chalk.yellow(`   Progress: ${interruptedBatch.batchInfo.successCount}/${interruptedBatch.batchInfo.actionCount} actions completed`));
+    
+    console.log(chalk.bold.cyan('\n📋 Select actions to test:'));
+    console.log('1. Resume from interruption 📍');
+    console.log('2. Test all actions (fresh start)');
+    console.log('3. Continue from last batch');
+    console.log('4. Test specific range (e.g., 51-100)');
+    console.log('5. Re-run failed actions 🔄');
+    console.log('6. Custom selection');
 
+    const choice = await rl.question('\n➡️ Choose option (1-6): ');
+    
+    let selection: ActionSelection;
+    
+    switch (choice) {
+      case '1':
+        selection = { type: 'continue' }; 
+        break;
+        case '2':
+          const defaultBatchSize = 75;
+          selection = { type: 'dependency-ordered', batchSize: defaultBatchSize };
+          break;
+      case '3':
+        selection = { type: 'continue' };
+        break;
+      case '4':
+        const range = await rl.question('Enter range (e.g., 51-100): ');
+        const [start, end] = range.split('-').map(n => parseInt(n.trim()) - 1);
+        selection = { type: 'range', startIndex: start, endIndex: end };
+        break;
+      case '5':
+        this.batchManager.displayFailedActionsSummary(platform, allActions);
+        const failedCount = this.batchManager.getFailedActionIds(platform).length;
+        if (failedCount === 0) {
+          console.log(chalk.yellow('No failed actions found. Using dependency-ordered execution instead.'));
+          const defaultBatchSize = 75;
+          selection = { type: 'dependency-ordered', batchSize: defaultBatchSize };
+        } else {
+          const confirm = await rl.question(`\n➡️ Re-run ${failedCount} failed actions? (y/n): `);
+          if (confirm.toLowerCase() === 'y' || confirm.toLowerCase() === 'yes') {
+            selection = { type: 'failed', platform };
+          } else {
+            const defaultBatchSize = 75;
+            selection = { type: 'dependency-ordered', batchSize: defaultBatchSize };
+          }
+        }
+        break;
+      case '6':
+        selection = await this.getCustomSelection(allActions);
+        break;
+      default:
+        console.log('Invalid choice. Resuming from interruption.');
+        selection = { type: 'continue' };
+    }
+    
+    const strategy = await this.batchManager.createStrategy(selection, platform, allActions);
+    
+    if (strategy.isResume) {
+      console.log(chalk.green(`\n✅ Will resume batch ${strategy.resumeContext.batchNumber} with ${strategy.selectedActions.length} remaining actions`));
+    }
+    
+    if (strategy.missingDependencies.length > 0) {
+      console.log(chalk.yellow(`\n⚠️ Warning: ${strategy.missingDependencies.length} dependencies missing from previous batches`));
+      console.log(chalk.gray('Context will be loaded automatically to resolve dependencies.'));
+    }
+
+    return { selection, strategy };
+  } else {
+    console.log(chalk.bold.cyan('\n Select actions to test:'));
+    console.log('1. Run all actions');
+    console.log('2. Continue from last batch');
+    console.log('3. Test specific range (e.g., 51-100)');
+    console.log('4. Re-run failed actions');
+    console.log('5. Custom selection');
+
+    const choice = await rl.question('\n➡️ Choose option (1-5): ');
+    
+    let selection: ActionSelection;
+    
+    switch (choice) {
+      case '1':
+        const batchSize = await this.getBatchSizeFromUser();
+        selection = { type: 'dependency-ordered', batchSize };
+        
+        console.log(chalk.blue('\n🔄 Analyzing dependencies and creating execution plan...'));
+        break;
+      case '2':
+        selection = { type: 'continue' };
+        break;
+      case '3':
+        const range = await rl.question('Enter range (e.g., 51-100): ');
+        const [start, end] = range.split('-').map(n => parseInt(n.trim()) - 1);
+        selection = { type: 'range', startIndex: start, endIndex: end };
+        break;
+      case '4':
+        this.batchManager.displayFailedActionsSummary(platform, allActions);
+        const failedCount = this.batchManager.getFailedActionIds(platform).length;
+        if (failedCount === 0) {
+          console.log(chalk.yellow('No failed actions found. Using dependency-ordered execution instead.'));
+          const defaultBatchSize = 75;
+          selection = { type: 'dependency-ordered', batchSize: defaultBatchSize };
+        } else {
+          const confirmFailed = await rl.question(`\n➡️ Re-run ${failedCount} failed actions? (y/n): `);
+          if (confirmFailed.toLowerCase() === 'y' || confirmFailed.toLowerCase() === 'yes') {
+            selection = { type: 'failed', platform };
+          } else {
+            const defaultBatchSize = 75;
+            selection = { type: 'dependency-ordered', batchSize: defaultBatchSize };
+          }
+        }
+        break;
+      case '5':
+        selection = await this.getCustomSelection(allActions);
+        break;
+      default:
+        console.log('Invalid choice. Using dependency-ordered execution.');
+        const defaultBatchSize = 75;
+        selection = { type: 'dependency-ordered', batchSize: defaultBatchSize };
+    }
+
+    const strategy = await this.batchManager.createStrategy(selection, platform, allActions);
+    
+    if (strategy.missingDependencies.length > 0) {
+      console.log(chalk.yellow(`\n⚠️ Warning: ${strategy.missingDependencies.length} dependencies missing from previous batches`));
+      console.log(chalk.gray('Context will be loaded automatically to resolve dependencies.'));
+    }
+
+    return { selection, strategy };
+  }
+}
+
+  private formatRange(selection: ActionSelection, actionCount: number): string {
+    switch (selection.type) {
+      case 'dependency-ordered': return `1-${actionCount}`;
+      case 'continue': return `${(selection.startIndex || 0) + 1}-${(selection.startIndex || 0) + actionCount}`;
+      case 'range': return `${(selection.startIndex || 0) + 1}-${(selection.endIndex || 0) + 1}`;
+      default: return `custom-${actionCount}`;
+    }
+  }
+
+  private formatDuration(ms: number): string {
+    const hours = Math.floor(ms / (1000 * 60 * 60));
+    const minutes = Math.floor((ms % (1000 * 60 * 60)) / (1000 * 60));
+    const seconds = Math.floor((ms % (1000 * 60)) / 1000);
+    
+    if (hours > 0) {
+      return `${hours}h ${minutes}m ${seconds}s`;
+    } else if (minutes > 0) {
+      return `${minutes}m ${seconds}s`;
+    } else {
+      return `${seconds}s`;
+    }
+  }
+
+  private async getCustomSelection(allActions: ModelDefinition[]): Promise<ActionSelection> {
+    console.log(chalk.bold.cyan('\n🎯 Custom Action Selection:'));
+    console.log('1. Search by keyword');
+    console.log('2. Select by action numbers');
+    console.log('3. Select by action names');
+    
+    const method = await rl.question('\n➡️ Choose selection method (1-3): ');
+    
+    switch (method) {
+      case '1':
+        return await this.selectByKeyword(allActions);
+      case '2':
+        return await this.selectByNumbers(allActions);
+      case '3':
+        return await this.selectByNames(allActions);
+      default:
+        console.log(chalk.yellow('Invalid choice. Using keyword search.'));
+        return await this.selectByKeyword(allActions);
+    }
+  }
+
+  private async getBatchSizeFromUser(): Promise<number> {
+    console.log(chalk.bold.cyan('\n⚙️ Batch Size Configuration:'));
+    console.log(chalk.gray('Batch size determines how many actions are executed together.'));
+    console.log(chalk.gray('Larger batches = faster execution, smaller batches = better resource management.'));
+    console.log(chalk.gray('Recommended: 50-100 for most platforms, 25-50 for large platforms (1000+ actions).'));
+    
+    while (true) {
+      const input = await rl.question('\n➡️ Enter batch size (1-200, default 75): ');
+      
+      if (!input || input.trim() === '') {
+        console.log(chalk.green('Using default batch size: 75'));
+        return 75;
+      }
+      
+      const batchSize = parseInt(input.trim());
+      
+      if (isNaN(batchSize)) {
+        console.log(chalk.red('Invalid input. Please enter a number.'));
+        continue;
+      }
+      
+      if (batchSize < 1 || batchSize > 200) {
+        console.log(chalk.red('Batch size must be between 1 and 200.'));
+        continue;
+      }
+      
+      if (batchSize > 150) {
+        console.log(chalk.yellow('⚠️ Large batch size may cause memory issues with complex actions.'));
+      } else if (batchSize < 10) {
+        console.log(chalk.yellow('⚠️ Small batch size may result in slower execution.'));
+      }
+      
+      console.log(chalk.green(`✅ Batch size set to: ${batchSize}`));
+      return batchSize;
+    }
+  }
+
+  private async selectByKeyword(allActions: ModelDefinition[]): Promise<ActionSelection> {
+    const keyword = await rl.question('\n🔍 Enter keyword to search actions: ');
+    const filteredActions = allActions.filter(action =>
+      action.title.toLowerCase().includes(keyword.toLowerCase()) ||
+      action.modelName.toLowerCase().includes(keyword.toLowerCase()) ||
+      action.actionName.toLowerCase().includes(keyword.toLowerCase())
+    );
+
+    if (filteredActions.length === 0) {
+      console.log(chalk.red(`No actions found matching "${keyword}". Using dependency-ordered execution.`));
+      return { type: 'dependency-ordered', batchSize: 75 };
+    }
+
+    console.log(chalk.green(`\n✅ Found ${filteredActions.length} actions matching "${keyword}":`));
+    filteredActions.forEach((action, index) => {
+      console.log(`${chalk.cyan(String(index + 1).padStart(2))}. ${action.title} (${action.modelName})`);
+    });
+
+    const confirm = await rl.question('\n➡️ Use these actions? (y/n): ');
+    if (confirm.toLowerCase() === 'y' || confirm.toLowerCase() === 'yes') {
+      return {
+        type: 'custom',
+        actionIds: filteredActions.map(a => a._id)
+      };
+    } else {
+      console.log(chalk.yellow('Selection cancelled. Using dependency-ordered execution.'));
+      return { type: 'dependency-ordered', batchSize: 75 };
+    }
+  }
+
+  private async selectByNumbers(allActions: ModelDefinition[]): Promise<ActionSelection> {
+    console.log(chalk.cyan('\n📋 Available Actions:'));
+    allActions.forEach((action, index) => {
+      console.log(`${chalk.cyan(String(index + 1).padStart(3))}. ${action.title} (${action.modelName})`);
+    });
+
+    const numbersStr = await rl.question('\n➡️ Enter action numbers (comma-separated, e.g., 1,5,10-15): ');
+    const actionIds: string[] = [];
+    
+    const parts = numbersStr.split(',').map(p => p.trim());
+    
+    for (const part of parts) {
+      if (part.includes('-')) {
+        const [start, end] = part.split('-').map(n => parseInt(n.trim()));
+        for (let i = start; i <= end; i++) {
+          if (i >= 1 && i <= allActions.length) {
+            actionIds.push(allActions[i - 1]._id);
+          }
+        }
+      } else {
+        const num = parseInt(part);
+        if (num >= 1 && num <= allActions.length) {
+          actionIds.push(allActions[num - 1]._id);
+        }
+      }
+    }
+
+    if (actionIds.length === 0) {
+      console.log(chalk.red('No valid actions selected. Using dependency-ordered execution.'));
+      return { type: 'dependency-ordered', batchSize: 75 };
+    }
+
+    console.log(chalk.green(`\n✅ Selected ${actionIds.length} actions`));
+    return {
+      type: 'custom',
+      actionIds
+    };
+  }
+
+  private async selectByNames(allActions: ModelDefinition[]): Promise<ActionSelection> {
+    console.log(chalk.cyan('\n📋 Available Actions:'));
+    allActions.forEach((action, index) => {
+      console.log(`  ${action.title} (${action.modelName})`);
+    });
+
+    const namesStr = await rl.question('\n➡️ Enter action names (comma-separated, partial matches allowed): ');
+    const namePatterns = namesStr.split(',').map(p => p.trim().toLowerCase());
+    
+    const selectedActions = allActions.filter(action =>
+      namePatterns.some(pattern =>
+        action.title.toLowerCase().includes(pattern) ||
+        action.modelName.toLowerCase().includes(pattern)
+      )
+    );
+
+    if (selectedActions.length === 0) {
+      console.log(chalk.red('No actions matched the provided names. Using dependency-ordered execution.'));
+      return { type: 'dependency-ordered', batchSize: 75 };
+    }
+
+    console.log(chalk.green(`\n✅ Selected ${selectedActions.length} actions:`));
+    selectedActions.forEach(action => {
+      console.log(`  • ${action.title} (${action.modelName})`);
+    });
+
+    const confirm = await rl.question('\n➡️ Use these actions? (y/n): ');
+    if (confirm.toLowerCase() === 'y' || confirm.toLowerCase() === 'yes') {
+      return {
+        type: 'custom',
+        actionIds: selectedActions.map(a => a._id)
+      };
+    } else {
+      console.log(chalk.yellow('Selection cancelled. Using dependency-ordered execution.'));
+      return { type: 'dependency-ordered', batchSize: 75 };
+    }
+  }
+
+private async executeBatch(
+  connection: ConnectionDefinition,
+  strategy: BatchStrategy,
+  allActions: ModelDefinition[]
+): Promise<EnhancedActionResult[]> {
   const results: EnhancedActionResult[] = [];
   const failedActions: Array<{action: ModelDefinition, result: EnhancedActionResult, reason: string}> = [];
 
+  this.currentExecutionState = {
+    platform: connection.name,
+    batchNumber: strategy.batchNumber,
+    actionRange: this.formatRange({ type: 'dependency-ordered', batchSize: 75 }, strategy.selectedActions.length),
+    currentActionIndex: 0,
+    executedActions: [],
+    availableResources: {},
+    startTime: Date.now()
+  };
+
+  console.log(chalk.bold.inverse(`\n\n🔄 BATCH ${strategy.batchNumber}: Executing ${strategy.selectedActions.length} actions 🔄`));
+
+  console.log(chalk.cyan("\n🧩 Analyzing action dependencies..."));
+  
+  // Use cached dependency graph from batch manager to avoid duplicate analysis
+  let dependencyGraph;
+  if (strategy.dependencyGraph) {
+    console.log(chalk.green("   ✅ Using cached dependency graph from batch analysis"));
+    dependencyGraph = strategy.dependencyGraph;
+  } else {
+    console.log(chalk.blue("   🔄 No cached graph found, performing fresh analysis..."));
+    dependencyGraph = await this.dependencyAnalyzer.analyzeDependencies(
+      strategy.selectedActions,
+      connection.name
+    );
+  }
+
+  const sortedActions = this.dependencyAnalyzer.getSortedActions(dependencyGraph, strategy.selectedActions);
+  this.displayExecutionPlan(sortedActions, dependencyGraph);
+
   console.log(chalk.bold.inverse("\n\n🔄 PASS 1: Initial Execution with Dependency Order 🔄"));
 
-  for (const action of sortedActions) {
+  for (let i = 0; i < sortedActions.length; i++) {
+    const action = sortedActions[i];
+    
+    if (this.currentExecutionState) {
+      this.currentExecutionState.currentActionIndex = i;
+    }
+    
     const actionMetadata = this.dependencyAnalyzer.getActionMetadata(action._id, dependencyGraph);
 
     if (!action.knowledge || action.knowledge.trim() === "") {
       console.log(chalk.gray(`\n⏭️ Skipping "${action.title}" - No knowledge provided.`));
-      results.push({
+      const skippedResult = {
         actionTitle: action.title,
         modelName: action.modelName,
         success: false,
@@ -139,14 +568,19 @@ export class EnhancedPicaosTestingOrchestrator {
         attempts: 0,
         passNumber: 1,
         dependenciesMet: true
-      });
+      };
+      results.push(skippedResult);
+      
+      this.updateExecutionState(action, "Skipped - No knowledge provided", skippedResult, false);
       continue;
     }
 
     console.log(chalk.bold.blue(`\n🎯 Testing: "${action.title}" (${action.modelName})`));
     if (results.length > 0 && results.length % 5 === 0) {
       try {
-        this.logger.generateSummaryReport();
+        if (this.logger) {
+          this.logger.generateSummaryReport();
+        }
       } catch (err) {
         console.error('Error generating intermediate summary:', err);
       }
@@ -154,9 +588,14 @@ export class EnhancedPicaosTestingOrchestrator {
     if (actionMetadata) {
       console.log(chalk.gray(`   Priority: ${actionMetadata.priority}, Optional: ${actionMetadata.isOptional}`));
     }
+    
+    let actionPrompt = "Action execution";
+    
     const result = await this.executeActionWithSmartRetries(action, 1, dependencyGraph, this.maxRetriesPerAction);
     results.push(result);
 
+    this.updateExecutionState(action, actionPrompt, result, result.success);
+    
     this.contextManager.updateContext(action, result, result.extractedData);
 
     if (!result.success) {
@@ -232,13 +671,107 @@ export class EnhancedPicaosTestingOrchestrator {
     }
     throw error;
   }
+  
+  return results;
 }
 
 
-  public handleInterrupt(): void {
-    console.log(chalk.blue("\ Shutting down and generating final report..."));
-    if (this.logger) {
-      this.logger.generateSummaryReport();
+  public async handleInterrupt(): Promise<void> {
+    console.log(chalk.blue("\n🛑 Shutting down and saving state..."));
+    
+    try {
+      if (this.currentExecutionState) {
+        await this.saveInterruptState();
+      }
+      
+      await this.saveAllPendingKnowledge();
+      
+      if (this.logger) {
+        this.logger.generateSummaryReport();
+      }
+      
+      console.log(chalk.green("✅ Interrupt state saved successfully"));
+    } catch (error) {
+      console.error(chalk.red("❌ Error saving interrupt state:"), error);
+    }
+  }
+
+  public cleanup(): void {
+    try {
+      if (this.agentService) {
+        this.agentService.close();
+      }
+      console.log(chalk.gray("🧹 Resources cleaned up"));
+    } catch (error) {
+      console.error(chalk.red("❌ Error during cleanup:"), error);
+    }
+  }
+  
+  private async saveInterruptState(): Promise<void> {
+    if (!this.currentExecutionState) return;
+    
+    const contextDir = path.join(process.cwd(), 'logs', 'contexts');
+    if (!fs.existsSync(contextDir)) {
+      fs.mkdirSync(contextDir, { recursive: true });
+    }
+
+    const interruptFile = path.join(contextDir, 
+      `${this.currentExecutionState.platform}_batch_${this.currentExecutionState.batchNumber}_interrupt.json`);
+    
+    const minimalContext = {
+      platform: this.currentExecutionState.platform,
+      batchNumber: this.currentExecutionState.batchNumber,
+      actionRange: this.currentExecutionState.actionRange,
+      interruptedAt: this.currentExecutionState.currentActionIndex,
+      timestamp: new Date().toISOString(),
+      executedActions: this.currentExecutionState.executedActions.map(action => ({
+        ...action,
+        prompt: action.prompt.substring(0, 500), // Truncate for minimal storage
+        output: action.output.substring(0, 500)
+      })),
+      availableResources: this.currentExecutionState.availableResources,
+      duration: Date.now() - this.currentExecutionState.startTime
+    };
+
+    fs.writeFileSync(interruptFile, JSON.stringify(minimalContext, null, 2));
+    console.log(chalk.green(`   ✅ Saved interrupt context to ${interruptFile}`));
+    
+    this.historyManager.saveInterruptedBatch(this.currentExecutionState);
+  }
+  
+  private async saveAllPendingKnowledge(): Promise<void> {
+    try {
+      if (this.knowledgeRefiner && typeof this.knowledgeRefiner.saveAllPendingKnowledge === 'function') {
+        this.knowledgeRefiner.saveAllPendingKnowledge();
+      }
+    } catch (error) {
+      console.error(chalk.red("❌ Error saving pending knowledge:"), error);
+    }
+  }
+  
+  private updateExecutionState(action: ModelDefinition, prompt: string, result: any, success: boolean): void {
+    if (!this.currentExecutionState) return;
+    
+    this.currentExecutionState.executedActions.push({
+      actionId: action._id,
+      actionTitle: action.title,
+      prompt: prompt,
+      output: result.output || result.error || "",
+      success: success,
+      extractedData: result.extractedData
+    });
+    
+    if (result.extractedData?.ids) {
+      Object.entries(result.extractedData.ids).forEach(([key, value]) => {
+        if (!this.currentExecutionState!.availableResources[key]) {
+          this.currentExecutionState!.availableResources[key] = [];
+        }
+        if (Array.isArray(value)) {
+          this.currentExecutionState!.availableResources[key].push(...value);
+        } else {
+          this.currentExecutionState!.availableResources[key].push(value as string);
+        }
+      });
     }
   }
   private checkDependencies(
@@ -285,7 +818,10 @@ export class EnhancedPicaosTestingOrchestrator {
     console.log(chalk.blue(`\n💾 Saving ${modifiedKnowledgeActions.length} refined knowledge files...`));
     
     modifiedKnowledgeActions.forEach(result => {
-      const actionId = (result.actionId || 'unknown').replace("::", "_");
+      const actionId = (result.actionId || 'unknown')
+        .replace(/::/g, '_')
+        .replace(/[<>:"/\\|?*]/g, '_')
+        .replace(/_{2,}/g, '_');
       
       const prefix = result.success ? '' : 'failed_';
       const filename = `${prefix}${actionId}.md`;
@@ -293,11 +829,14 @@ export class EnhancedPicaosTestingOrchestrator {
       
       const content = `# ${result.actionTitle}\n\n## Model: ${result.modelName}\n\n${result.finalKnowledge}`;
       
-      fs.writeFileSync(filepath, content);
-      
-      const statusColor = result.success ? chalk.green : chalk.red;
-      const statusText = result.success ? 'Success' : 'Failed';
-      console.log(statusColor(`   ✓ Saved ${statusText}: ${filename}`));
+      try {
+        fs.writeFileSync(filepath, content);
+        const statusColor = result.success ? chalk.green : chalk.red;
+        const statusText = result.success ? 'Success' : 'Failed';
+        console.log(statusColor(`   ✓ Saved ${statusText}: ${filename}`));
+      } catch (error) {
+        console.error(chalk.red(`   ❌ Failed to save ${filename}: ${error}`));
+      }
     });
   }
 
@@ -417,10 +956,24 @@ export class EnhancedPicaosTestingOrchestrator {
       }
     }
     
-    strategyUsed = strategy.tone;
+    strategyUsed = strategy.tone === 'conversation' ? 'conversational' : strategy.tone;
     
-    const agentResult = await this.agentService.executeSmartTask(prompt, undefined, action, context, attempts);
+    const agentResult = await this.agentService.executeSmartTask(prompt, undefined, action, context, attempts, strategyUsed);
 
+    if (!agentResult.success && agentResult.error) {
+      const rateLimitDecision = await this.agentService.handleRateLimitIfNeeded(
+        agentResult.error, 
+        agentResult.output || '', 
+        action
+      );
+      
+      if (rateLimitDecision === 'abort') {
+        console.log(chalk.red("   🛑 User chose to abort due to rate limit. Stopping execution."));
+        throw new Error("Rate limit abort - User requested to stop execution");
+      } else if (rateLimitDecision === 'retry') {
+        console.log(chalk.blue("   🔄 Rate limit handled, retrying action..."));
+      }
+    }
    
     if (!agentResult.success && (agentResult.output?.includes('403') || agentResult.error?.includes('403'))) {
         console.log(chalk.yellow("   Directly detected a 403 error. Flagging as a definitive permission error."));

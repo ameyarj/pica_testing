@@ -1,12 +1,7 @@
-import { generateText, generateObject } from "ai";
+import { generateObject } from "ai";
 import { z } from 'zod';
-import { ModelDefinition } from './interface';
-import { 
-  PlatformProfile, 
-  UseCase, 
-  Scenario, 
-  ScenarioStep 
-} from './interface';
+import { ModelDefinition } from './interfaces/interface';
+import { PlatformProfile, UseCase} from './interfaces/interface';
 import { initializeModel } from './utils/modelInitializer';
 import { trackLLMCall } from './utils/tokenTrackerUtils';
 import chalk from 'chalk';

@@ -2,11 +2,13 @@ import { openai } from "@ai-sdk/openai";
 import { anthropic } from "@ai-sdk/anthropic";
 import { generateText, generateObject, LanguageModel } from "ai";
 import { z } from 'zod';
-import { ModelDefinition, ExecutionContext} from './interface';
+import { ModelDefinition, ExecutionContext} from './interfaces/interface';
 import { EnhancedModelSelector } from './enhanced_model_selector';
 import { initializeModel } from './utils/modelInitializer';
 import { trackLLMCall } from './utils/tokenTrackerUtils';
-
+import fs from 'fs';
+import path from 'path';
+import chalk from 'chalk';
 
 const RefinementSchema = z.object({
   knowledge: z.string().nullable().describe("Updated knowledge text, or null if no changes needed"),
@@ -18,6 +20,7 @@ const RefinementSchema = z.object({
 export class KnowledgeRefiner {
   private llmModel: LanguageModel;
   private useClaudeForRefinement: boolean;
+  private pendingKnowledge: Map<string, {actionId: string, platform: string, knowledge: string}> = new Map();
 
   constructor(openAIApiKey: string, useClaudeForRefinement: boolean = true) {
   if (!openAIApiKey && !process.env.ANTHROPIC_API_KEY) {
@@ -259,6 +262,14 @@ ${promptStrategy || 'Execute the action using the above values directly.'}`;
 
     const generalizedKnowledge = enhancedKnowledge ? this.generalizeRefinedKnowledge(enhancedKnowledge, context) : undefined;
 
+    if (generalizedKnowledge) {
+      this.pendingKnowledge.set(actionDetails._id, {
+        actionId: actionDetails._id,
+        platform: actionDetails.connectionPlatform,
+        knowledge: generalizedKnowledge
+      });
+    }
+
     return {
       knowledge: generalizedKnowledge?.trim() || undefined,
       promptStrategy: promptStrategy?.trim() || undefined,
@@ -404,4 +415,70 @@ ${promptStrategy || 'Execute the action using the above values directly.'}`;
       promptStrategy
     };
   }
+
+persistRefinedKnowledge(platform: string, batchNumber: number, actionId: string, refinedKnowledge: string): void {
+  const knowledgeDir = path.join(process.cwd(), 'logs', 'knowledge', platform);
+  if (!fs.existsSync(knowledgeDir)) {
+    fs.mkdirSync(knowledgeDir, { recursive: true });
+  }
+
+  const filename = `batch_${batchNumber}_${actionId.replace(/[^a-zA-Z0-9]/g, '_')}.md`;
+  const filepath = path.join(knowledgeDir, filename);
+  
+  const content = `# Refined Knowledge - Batch ${batchNumber}\n\n## Action ID: ${actionId}\n\n${refinedKnowledge}`;
+  fs.writeFileSync(filepath, content);
+}
+
+loadRefinedKnowledge(platform: string, batchNumbers: number[], actionId: string): string | null {
+  const knowledgeDir = path.join(process.cwd(), 'logs', 'knowledge', platform);
+  
+  for (const batchNumber of batchNumbers.reverse()) {
+    const filename = `batch_${batchNumber}_${actionId.replace(/[^a-zA-Z0-9]/g, '_')}.md`;
+    const filepath = path.join(knowledgeDir, filename);
+    
+    if (fs.existsSync(filepath)) {
+      const content = fs.readFileSync(filepath, 'utf-8');
+      const knowledgeMatch = content.match(/## Action ID: .+\n\n([\s\S]+)$/);
+      return knowledgeMatch ? knowledgeMatch[1] : null;
+    }
+  }
+  
+  return null;
+}
+
+saveAllPendingKnowledge(): void {
+  if (this.pendingKnowledge.size === 0) {
+    console.log(chalk.gray('   No pending knowledge to save'));
+    return;
+  }
+
+  console.log(chalk.blue(`   💾 Saving ${this.pendingKnowledge.size} pending knowledge files...`));
+  
+  for (const [actionId, data] of this.pendingKnowledge) {
+    try {
+      const knowledgeDir = path.join(process.cwd(), 'knowledge', data.platform);
+      if (!fs.existsSync(knowledgeDir)) {
+        fs.mkdirSync(knowledgeDir, { recursive: true });
+      }
+
+      const cleanActionId = actionId
+        .replace(/::/g, '_')
+        .replace(/[<>:"/\\|?*]/g, '_')
+        .replace(/_{2,}/g, '_');
+      
+      const filename = `interrupt_${cleanActionId}.md`;
+      const filepath = path.join(knowledgeDir, filename);
+      
+      const content = `# Refined Knowledge (Interrupt Save)\n\n## Action ID: ${actionId}\n\n${data.knowledge}`;
+      fs.writeFileSync(filepath, content);
+      
+      console.log(chalk.green(`   ✓ Saved: ${filename}`));
+    } catch (error) {
+      console.error(chalk.red(`   ❌ Failed to save knowledge for ${actionId}: ${error}`));
+    }
+  }
+  
+  this.pendingKnowledge.clear();
+}
+
 }

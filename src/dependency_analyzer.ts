@@ -1,6 +1,5 @@
-import { ModelDefinition } from './interface';
+import { ModelDefinition } from './interfaces/interface';
 import { generateObject, LanguageModel } from "ai";
-import { ApiDocAnalyzer } from './api_doc_analyzer';
 import { z } from 'zod';
 import chalk from 'chalk';
 import { initializeModel } from './utils/modelInitializer';
@@ -37,61 +36,30 @@ type DependencyGraph = z.infer<typeof DependencyGraphSchema>;
 
 export class EnhancedDependencyAnalyzer {
   private analysisModel: LanguageModel;
-  private apiDocAnalyzer: ApiDocAnalyzer;
   
   constructor(private useClaudeForAnalysis: boolean = true) {
-  this.analysisModel = initializeModel(useClaudeForAnalysis, 'dependency-analyzer');
-  
-  this.apiDocAnalyzer = new ApiDocAnalyzer();
-}
+    this.analysisModel = initializeModel(useClaudeForAnalysis, 'dependency-analyzer');
+  }
 
   async analyzeDependencies(
-  actions: ModelDefinition[],
-  platformName: string,
-  useApiDocs: boolean = false
-): Promise<DependencyGraph> {
-  if (useApiDocs && process.env.OPENAI_API_KEY) {
-    console.log(chalk.blue(`📚 Enhancing dependency analysis with API documentation...`));
-    await this.enhanceActionsWithApiDocs(actions.slice(0, 5), platformName); 
-  }
-  
-  const CHUNK_SIZE = 15; 
-  
-  if (actions.length <= CHUNK_SIZE) {
-    return this.analyzeActionsDirectly(actions, platformName);
-  }
-  
-  console.log(chalk.blue(`📊 Large action set (${actions.length}). Using divide-and-conquer approach...`));
-  
-  const chunks = this.chunkActions(actions, CHUNK_SIZE);
-  const chunkResults = await this.analyzeChunks(chunks, platformName);
-  
-  const mergedGraph = this.mergeChunkResults(chunkResults, actions);
-  
-  return this.resolveCrossChunkDependencies(mergedGraph, actions);
-}
-
-private async enhanceActionsWithApiDocs(
-  actions: ModelDefinition[],
-  platformName: string
-): Promise<void> {
-  for (const action of actions) {
-    try {
-      const apiDoc = await this.apiDocAnalyzer.searchApiDocumentation(action, platformName);
-      
-      if (apiDoc) {
-        const enhancedKnowledge = await this.apiDocAnalyzer.enhanceActionKnowledge(action, apiDoc);
-        action.knowledge = enhancedKnowledge;
-        
-        const requiredParams = this.apiDocAnalyzer.getRequiredParameters(apiDoc);
-        
-        (action as any)._enhancedParams = requiredParams;
-      }
-    } catch (error) {
-      console.log(chalk.yellow(`   ⚠️ Could not fetch API docs for ${action.title}`));
+    actions: ModelDefinition[],
+    platformName: string
+  ): Promise<DependencyGraph> {
+    const CHUNK_SIZE = 13; 
+    
+    if (actions.length <= CHUNK_SIZE) {
+      return this.analyzeActionsDirectly(actions, platformName);
     }
+    
+    console.log(chalk.blue(`📊 Large action set (${actions.length}). Using divide-and-conquer approach...`));
+    
+    const chunks = this.chunkActions(actions, CHUNK_SIZE);
+    const chunkResults = await this.analyzeChunks(chunks, platformName);
+    
+    const mergedGraph = this.mergeChunkResults(chunkResults, actions);
+    
+    return this.resolveCrossChunkDependencies(mergedGraph, actions);
   }
-}
 
 private chunkActions(actions: ModelDefinition[], chunkSize: number): ModelDefinition[][] {
   const chunks: ModelDefinition[][] = [];
@@ -109,33 +77,75 @@ private async analyzeChunks(
   
   for (let i = 0; i < chunks.length; i++) {
     console.log(chalk.gray(`   Analyzing chunk ${i + 1}/${chunks.length}...`));
-    const chunkGraph = await this.analyzeActionsDirectly(chunks[i], platformName);
     
-    const chunkResult: ChunkResult = {
-      nodes: chunkGraph.nodes,
-      internalDependencies: new Map(),
-      externalRequirements: new Map(),
-      externalProvisions: new Map()
-    };
-    
-    for (const node of chunkGraph.nodes) {
-      const chunkIds = new Set(chunks[i].map(a => a._id));
-      const internal = node.dependsOn.filter(id => chunkIds.has(id));
-      const external = node.dependsOn.filter(id => !chunkIds.has(id));
+    try {
+      const chunkGraph = await this.analyzeActionsDirectly(chunks[i], platformName);
       
-      if (internal.length > 0) {
-        chunkResult.internalDependencies.set(node.id, internal);
-      }
-      if (external.length > 0) {
-        chunkResult.externalRequirements.set(node.id, external);
+      const chunkResult: ChunkResult = {
+        nodes: chunkGraph.nodes,
+        internalDependencies: new Map(),
+        externalRequirements: new Map(),
+        externalProvisions: new Map()
+      };
+      
+      for (const node of chunkGraph.nodes) {
+        const chunkIds = new Set(chunks[i].map(a => a._id));
+        const internal = node.dependsOn.filter(id => chunkIds.has(id));
+        const external = node.dependsOn.filter(id => !chunkIds.has(id));
+        
+        if (internal.length > 0) {
+          chunkResult.internalDependencies.set(node.id, internal);
+        }
+        if (external.length > 0) {
+          chunkResult.externalRequirements.set(node.id, external);
+        }
+        
+        if (node.providesIds.length > 0) {
+          chunkResult.externalProvisions.set(node.id, node.providesIds);
+        }
       }
       
-      if (node.providesIds.length > 0) {
-        chunkResult.externalProvisions.set(node.id, node.providesIds);
+      results.push(chunkResult);
+      
+      // Add delay between chunks to prevent API rate limiting
+      if (i < chunks.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 2000)); // 2 second delay
+      }
+      
+    } catch (error: any) {
+      console.error(`Error in chunk analysis:`, error);
+      
+      // Create fallback result for failed chunk
+      const fallbackResult: ChunkResult = {
+        nodes: chunks[i].map(action => ({
+          id: action._id,
+          actionName: action.actionName,
+          modelName: action.modelName,
+          dependsOn: [],
+          providesIds: this.inferProvidedIds(action),
+          providesNames: [],
+          providesEmails: [],
+          providesPhones: [],
+          requiresIds: this.inferRequiredIds(action),
+          requiresNames: [],
+          requiresEmails: [],
+          requiresPhones: [],
+          priority: this.getDefaultPriority(action),
+          canRetry: true,
+          isOptional: false
+        })),
+        internalDependencies: new Map(),
+        externalRequirements: new Map(),
+        externalProvisions: new Map()
+      };
+      
+      results.push(fallbackResult);
+      
+      // Add longer delay after errors to help with recovery
+      if (i < chunks.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 5000)); // 5 second delay after error
       }
     }
-    
-    results.push(chunkResult);
   }
   
   return results;
@@ -186,21 +196,42 @@ ${actions.map(action => `
 
 Based on the actions above, create a complete dependency graph with execution priority and parallel execution groups.`;
 
-  try {
-    const { object: graph } = await generateObject({
-      model: this.analysisModel,
-      schema: DependencyGraphSchema,
-      system: systemPrompt,
-      prompt: userPrompt,
-      maxRetries: 2,
-      temperature: 0.3
-    });
+  let retryCount = 0;
+  const maxRetries = 3;
+  
+  while (retryCount <= maxRetries) {
+    try {
+      const { object: graph } = await generateObject({
+        model: this.analysisModel,
+        schema: DependencyGraphSchema,
+        system: systemPrompt,
+        prompt: userPrompt,
+        maxRetries: 1,
+        temperature: 0.3
+      });
 
-    return this.validateAndOptimizeGraph(graph, actions);
-  } catch (error: any) {
-    console.error('Error in chunk analysis:', error);
-    return this.createFallbackGraph(actions);
+      return this.validateAndOptimizeGraph(graph, actions);
+    } catch (error: any) {
+      retryCount++;
+      
+      // Check if it's an overload error (429 or 529)
+      const isOverloadError = error.message?.includes('Overloaded') || 
+                             error.statusCode === 529 || 
+                             error.statusCode === 429;
+      
+      if (isOverloadError && retryCount <= maxRetries) {
+        const delayMs = Math.pow(2, retryCount) * 1000; // Exponential backoff: 2s, 4s, 8s
+        console.log(chalk.yellow(`   ⚠️ API overloaded, retrying in ${delayMs/1000}s... (attempt ${retryCount}/${maxRetries})`));
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+        continue;
+      }
+      
+      console.error('Error in chunk analysis:', error);
+      return this.createFallbackGraph(actions);
+    }
   }
+  
+  return this.createFallbackGraph(actions);
 }
 
 private mergeChunkResults(

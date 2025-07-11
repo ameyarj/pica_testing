@@ -1,11 +1,14 @@
-import { ModelDefinition, ExecutionContext, ActionResult } from './interface';
-import { PromptGenerationContext } from './interface';
+import { ModelDefinition, ExecutionContext, ActionResult } from './interfaces/interface';
+import { PromptGenerationContext } from './interfaces/interface';
 import { PlatformUseCaseAnalyzer } from './platform_usecase_analyzer';
 import chalk from 'chalk';
 
 export class EnhancedContextManager {
   private globalContext: ExecutionContext;
   private readonly maxRecentActions = 10;
+  private readonly maxResourcesPerType = 50;
+  private readonly maxMetadataEntries = 20;
+  private readonly maxCreatedResources = 100;
   private platformAnalyzer: PlatformUseCaseAnalyzer;
   private conversationHistory: {
     prompts: string[];
@@ -35,7 +38,7 @@ export class EnhancedContextManager {
       actionTitle: action.title,
       modelName: action.modelName,
       success: result.success,
-      output: result.output, 
+      output: result.output ? this.truncateOutput(result.output) : undefined, 
       error: result.error
     });
 
@@ -45,65 +48,31 @@ export class EnhancedContextManager {
 
     if (result.success && extractedData) {
       if (extractedData.created_resources) {
-        for (const [key, value] of Object.entries(extractedData.created_resources)) {
-          console.log(`[ContextManager] Storing created resource: ${key}`);
-          this.globalContext.createdResources.set(key, value);
-        }
+        this.processCreatedResources(extractedData.created_resources);
       }
 
       if (extractedData.names) {
-        for (const [key, name] of Object.entries(extractedData.names)) {
-          if (typeof name === 'string') {
-            console.log(`[ContextManager] Storing name: ${key} = ${name}`);
-            const idKey = key.replace('Name', 'Id');
-            if (!this.globalContext.availableNames) {
-              this.globalContext.availableNames = new Map();
-            }
-            this.globalContext.availableNames.set(idKey, name);
-            this.globalContext.availableNames.set(key, name);
-          }
-        }
+        this.processNames(extractedData.names);
       }
 
-      if (extractedData.emails && extractedData.emails.length > 0) {
-        console.log(`[ContextManager] Storing emails: ${extractedData.emails.join(', ')}`);
-        this.globalContext.createdResources.set('emails', extractedData.emails);
-      }
-
-      if (extractedData.phones && extractedData.phones.length > 0) {
-        console.log(`[ContextManager] Storing phones: ${extractedData.phones.join(', ')}`);
-        this.globalContext.createdResources.set('phones', extractedData.phones);
-      }
+      this.processContactInfo(extractedData);
 
       if (extractedData.metadata && Object.keys(extractedData.metadata).length > 0) {
-        console.log(`[ContextManager] Storing metadata:`, extractedData.metadata);
-        for (const [key, value] of Object.entries(extractedData.metadata)) {
-          this.globalContext.createdResources.set(`metadata_${key}`, value);
-        }
+        this.processMetadataSmartly(extractedData.metadata);
       }
 
       if (extractedData.ids) {
-        for (const [key, id] of Object.entries(extractedData.ids)) {
-          if (typeof id === 'string') {
-            if (!this.globalContext.availableIds.has(key)) {
-              this.globalContext.availableIds.set(key, []);
-            }
-            console.log(`[ContextManager] Storing ID: ${key} = ${id}`);
-            this.globalContext.availableIds.get(key)!.push(id);
-          }
-        }
+        this.processIdsSmartly(extractedData.ids);
       }
 
       this.storePathParameters(action.path, extractedData);
 
       if (extractedData.extracted_lists) {
-        for (const [key, list] of Object.entries(extractedData.extracted_lists)) {
-          console.log(`[ContextManager] Storing extracted list: ${key}`);
-          this.globalContext.createdResources.set(key, list);
-        }
+        this.processExtractedLists(extractedData.extracted_lists);
       }
     }
 
+    this.performPeriodicCleanup();
     this.updatePlatformSummary();
   }
 
@@ -486,5 +455,191 @@ export class EnhancedContextManager {
       availableNames: new Map()
     };
     this.resetConversationHistory();
+  }
+
+  mergeContext(contextToMerge: ExecutionContext): void {
+  if (contextToMerge.availableIds) {
+    for (const [key, values] of contextToMerge.availableIds.entries()) {
+      if (!this.globalContext.availableIds.has(key)) {
+        this.globalContext.availableIds.set(key, []);
+      }
+      const existing = this.globalContext.availableIds.get(key)!;
+      const newValues = Array.isArray(values) ? values : [values];
+      newValues.forEach(value => {
+        if (!existing.includes(value)) {
+          existing.push(value);
+        }
+      });
+    }
+  }
+
+  if (contextToMerge.availableNames) {
+    for (const [key, name] of contextToMerge.availableNames.entries()) {
+      this.globalContext.availableNames.set(key, name);
+    }
+  }
+
+  if (contextToMerge.createdResources) {
+    for (const [key, resource] of contextToMerge.createdResources.entries()) {
+      this.globalContext.createdResources.set(key, resource);
+    }
+  }
+
+  this.globalContext.recentActions.push(...contextToMerge.recentActions);
+  if (this.globalContext.recentActions.length > this.maxRecentActions) {
+    this.globalContext.recentActions = this.globalContext.recentActions.slice(-this.maxRecentActions);
+  }
+
+  if (contextToMerge.platformSummary) {
+    this.globalContext.platformSummary = contextToMerge.platformSummary + '\n\nMerged from previous batch context.';
+  }
+
+  console.log(chalk.green(`   ✅ Merged context: ${contextToMerge.availableIds?.size || 0} IDs, ${contextToMerge.createdResources?.size || 0} resources`));
+}
+
+  private truncateOutput(output: string): string {
+    const maxLength = 500; 
+    if (output.length <= maxLength) return output;
+    return output.substring(0, maxLength) + '... [truncated]';
+  }
+
+  private processCreatedResources(createdResources: Record<string, any>): void {
+    let resourceCount = 0;
+    for (const [key, value] of Object.entries(createdResources)) {
+      if (resourceCount >= this.maxCreatedResources) {
+        console.log(`[ContextManager] Skipping resource ${key} - limit reached`);
+        break;
+      }
+      
+      if (this.isImportantResource(key, value)) {
+        console.log(`[ContextManager] Storing created resource: ${key}`);
+        this.globalContext.createdResources.set(key, value);
+        resourceCount++;
+      }
+    }
+  }
+
+  private processNames(names: Record<string, any>): void {
+    for (const [key, name] of Object.entries(names)) {
+      if (typeof name === 'string' && name.trim()) {
+        const cleanName = name.trim();
+        if (!this.globalContext.availableNames) {
+          this.globalContext.availableNames = new Map();
+        }
+        
+        this.globalContext.availableNames.set(key, cleanName);
+        console.log(`[ContextManager] Storing name: ${key} = ${cleanName}`);
+      }
+    }
+  }
+
+  private processContactInfo(extractedData: any): void {
+    if (extractedData.emails && extractedData.emails.length > 0) {
+      const uniqueEmails = [...new Set(extractedData.emails)];
+      if (uniqueEmails.length > 0) {
+        console.log(`[ContextManager] Storing emails: ${uniqueEmails.join(', ')}`);
+        this.globalContext.createdResources.set('emails', uniqueEmails);
+      }
+    }
+
+    if (extractedData.phones && extractedData.phones.length > 0) {
+      const uniquePhones = [...new Set(extractedData.phones)];
+      if (uniquePhones.length > 0) {
+        console.log(`[ContextManager] Storing phones: ${uniquePhones.join(', ')}`);
+        this.globalContext.createdResources.set('phones', uniquePhones);
+      }
+    }
+  }
+
+  private processMetadataSmartly(metadata: Record<string, any>): void {
+    const groupedMetadata: Record<string, any> = {
+      system: {},
+      user: {},
+      config: {},
+      other: {}
+    };
+
+    let metadataCount = 0;
+    for (const [key, value] of Object.entries(metadata)) {
+      if (metadataCount >= this.maxMetadataEntries) break;
+
+      if (key.includes('user') || key.includes('email') || key.includes('name')) {
+        groupedMetadata.user[key] = value;
+      } else if (key.includes('config') || key.includes('setting') || key.includes('option')) {
+        groupedMetadata.config[key] = value;
+      } else if (key.includes('system') || key.includes('platform') || key.includes('service')) {
+        groupedMetadata.system[key] = value;
+      } else {
+        groupedMetadata.other[key] = value;
+      }
+      metadataCount++;
+    }
+
+    Object.entries(groupedMetadata).forEach(([category, data]) => {
+      if (Object.keys(data).length > 0) {
+        this.globalContext.createdResources.set(`metadata_${category}`, data);
+      }
+    });
+
+    console.log(`[ContextManager] Stored grouped metadata: ${metadataCount} entries`);
+  }
+
+  private processIdsSmartly(ids: Record<string, any>): void {
+    for (const [key, id] of Object.entries(ids)) {
+      if (typeof id === 'string' && id.trim()) {
+        this.storeIdWithDeduplication(key, id.trim());
+      }
+    }
+  }
+
+  private processExtractedLists(extractedLists: Record<string, any>): void {
+    for (const [key, list] of Object.entries(extractedLists)) {
+      if (Array.isArray(list) && list.length > 0) {
+        const truncatedList = list.slice(0, 10); 
+        console.log(`[ContextManager] Storing extracted list: ${key} (${truncatedList.length} items)`);
+        this.globalContext.createdResources.set(key, truncatedList);
+      }
+    }
+  }
+
+  private storeIdWithDeduplication(key: string, value: string): void {
+    if (!this.globalContext.availableIds.has(key)) {
+      this.globalContext.availableIds.set(key, []);
+    }
+    const existingIds = this.globalContext.availableIds.get(key)!;
+    
+    if (!existingIds.includes(value)) {
+      if (existingIds.length >= this.maxResourcesPerType) {
+        existingIds.shift(); 
+      }
+      existingIds.push(value);
+      console.log(`[ContextManager] Storing ID: ${key} = ${value}`);
+    }
+  }
+
+  private performPeriodicCleanup(): void {
+    if (this.globalContext.createdResources.size > this.maxCreatedResources) {
+      const entries = Array.from(this.globalContext.createdResources.entries());
+      const toRemove = entries.slice(0, entries.length - this.maxCreatedResources);
+      
+      toRemove.forEach(([key]) => {
+        this.globalContext.createdResources.delete(key);
+      });
+      
+      console.log(`[ContextManager] Cleaned up ${toRemove.length} old resources`);
+    }
+  }
+
+  private isImportantResource(key: string, value: any): boolean {
+    if (key.startsWith('metadata_') && typeof value === 'string' && value.length < 5) {
+      return false; 
+    }
+    
+    const skipPatterns = ['timestamp', 'created_date', 'modified_date', 'version', 'schema'];
+    if (skipPatterns.some(pattern => key.toLowerCase().includes(pattern))) {
+      return false;
+    }
+    
+    return true;
   }
 }

@@ -6,7 +6,7 @@ import { openai } from "@ai-sdk/openai";
 import { anthropic } from "@ai-sdk/anthropic";
 import { generateText, generateObject, LanguageModel } from "ai";
 import { z } from 'zod';
-import { ModelDefinition, ExecutionContext, ExtractedDataEnhanced } from './interface';
+import { ModelDefinition, ExecutionContext, ExtractedDataEnhanced } from './interfaces/interface';
 import { PathParameterResolver } from './path_resolver';
 import { EnhancedModelSelector } from './enhanced_model_selector';
 import { ExecutionLogger } from './execution_logger';
@@ -16,6 +16,7 @@ import { initializeModel } from './utils/modelInitializer';
 import { extractResourceFromTitle } from './utils/resourceExtractor';
 import { trackLLMCall } from './utils/tokenTrackerUtils';
 import { extractParametersFromPath } from './utils/pathUtils';
+import { RateLimitManager } from './rate_limit_manager';
 import chalk from 'chalk';
 
 const ExtractedDataSchema = z.object({
@@ -60,6 +61,7 @@ export class EnhancedAgentService {
   private useClaudeForAgent: boolean;
   private logger?: ExecutionLogger;
   private conversationHandler: ConversationHandler;
+  private rateLimitManager: RateLimitManager;
 
   constructor(
   picaSecretKey: string, 
@@ -90,6 +92,7 @@ export class EnhancedAgentService {
   });
 
   this.conversationHandler = new ConversationHandler();
+  this.rateLimitManager = new RateLimitManager();
   this.initializeAgent(openAIApiKey);
 }
 
@@ -108,10 +111,18 @@ setLogger(logger: ExecutionLogger): void {
 
 You are an intelligent API testing agent that executes actions across diverse platforms and models. Your core mission is to successfully execute the provided Pica tool action.
 
+🚨 CRITICAL PLATFORM SELECTION RULE:
+- ALWAYS use the platform explicitly mentioned in the user's prompt
+- If the user says "Show me my Ably Control API token", use ONLY Ably Control, never GitHub, Gmail, or other platforms
+- If the user says "Create a document in Google Drive", use ONLY Google Drive
+- If the user says "Send an email using Gmail", use ONLY Gmail, never Outlook
+- When multiple platforms are available, the platform mentioned in the prompt takes absolute priority
+- If no platform is specified, ask for clarification rather than guessing
+
 EXECUTION PRINCIPLES:
 - ALWAYS call the Pica tool to execute the action - never simulate or describe
 - Use available context data (IDs, resources) from previous actions automatically
- When you encounter missing parameters, use reasonable defaults:
+- When you encounter missing parameters, use reasonable defaults:
   - For userId/userEmail: Use test values like "connectors@picaos.com" 
   - For DateTime: Use current date/time in ISO format (e.g., new Date().toISOString())
   - For names/titles: Generate realistic test data
@@ -120,7 +131,13 @@ EXECUTION PRINCIPLES:
 - For update/delete actions: verify the target resource exists first, create mock data if needed
 - NEVER stop at planning or analysis - always proceed to execution
 
-CRITICAL RULE: You must ALWAYS make actual Pica tool call. Do not end your response without executing the action. Say Pica Onetool to write START and END at the beginning and end of its every response and you must verify this keyword is present in the response and then only start analzing for failure or success.
+🚨 CRITICAL TOOL EXECUTION RULE:
+- You must ALWAYS make actual Pica tool call and WAIT for complete response
+- Do not respond until the Pica tool has fully executed and returned complete results
+- If tool execution seems incomplete, wait longer or retry the tool call
+- Never provide partial responses - always ensure tool execution is complete
+- The tool response must contain "START" and "END" markers - verify these are present
+- Only after receiving complete tool results should you format and present your response
 
 CONTEXT UTILIZATION:
 - The "Available Data" JSON contains IDs and resources from previous successful actions
@@ -408,28 +425,36 @@ ${outputText || "No text output."}
       anthropic("claude-sonnet-4-20250514") : 
       modelToUse === 'gpt-4o' ? openai("gpt-4o") : openai("gpt-4.1");
 
-    const systemPrompt = `You are a comprehensive data extraction engine. Extract ALL meaningful data from API responses.
+    const systemPrompt = `You are a comprehensive data extraction engine. Extract ALL meaningful data from any platform's API responses.
 
     EXTRACTION PRIORITIES (in order):
     1. **NAMES/TITLES**: Any human-readable names, titles, labels, subjects
-    2. **IDs**: Technical identifiers and keys  
-    3. **OTHER DATA**: Emails, phones, metadata
+    2. **IDs/TOKENS**: Technical identifiers, keys, tokens, and reference numbers
+    3. **OTHER DATA**: Emails, phones, URLs, metadata
 
-    SPECIFIC PATTERNS TO FIND:
-    - Resource names: "title", "name", "subject", "summary", "label", "displayName"
-    - Event names: event titles, meeting subjects, calendar item names
-    - Document names: file names, document titles, spreadsheet names
-    - User names: creator names, owner names, participant names
-    - IDs: Any alphanumeric identifiers (10+ chars)
+    UNIVERSAL PATTERNS TO FIND:
+    - **Platform IDs**: cloudId, accountId, workspaceId, organizationId, teamId, userId, projectId
+    - **Resource IDs**: documentId, fileId, folderId, issueId, taskId, channelId, repositoryId
+    - **Authentication**: apiKey, accessToken, authToken, sessionId, clientId
+    - **Names/Titles**: title, name, subject, summary, label, displayName, description
+    - **Contact Info**: emails, phone numbers, usernames
+    - **URLs/Links**: webhookUrl, apiUrl, downloadUrl, shareUrl
 
-    NAMING CONVENTIONS:
-    - If extracting event data: use "eventName", "eventId" 
-    - If extracting document data: use "documentName", "documentId"
-    - If extracting file data: use "fileName", "fileId"
-    - If extracting calendar data: use "calendarName", "calendarId"
-    - If extracting spreadsheet data: use "spreadsheetName", "spreadsheetId"
+    SMART KEY INFERENCE:
+    - Match context clues: "Jira Cloud ID" → jiraCloudId, "GitHub Token" → githubToken
+    - Generic fallbacks: unknown IDs → "id", unknown names → "name"
+    - Platform-specific: mention of platform → platformId (e.g., "slack" → slackId)
+    - Resource-specific: mention of resource → resourceId (e.g., "document" → documentId)
 
-    Be thorough but accurate.`;
+    EXTRACTION RULES:
+    - Extract IDs from any format: JSON, natural language, backticks, quotes
+    - Handle phrases like "I have the X ID: Y", "Found X: Y", "X is: Y"
+    - Look for UUIDs, alphanumeric codes, tokens (8+ chars typically)
+    - Extract names from titles, subjects, labels, displayNames
+    - Capture emails and phones when present
+    - Store metadata for dates, status, types, counts
+
+    Be thorough and adapt to any platform (Google, Microsoft, Slack, GitHub, Jira, etc.).`;
 
     const userPrompt = `Extract ALL meaningful data from this output. Focus on finding:
 
@@ -486,31 +511,55 @@ ${outputText || "No text output."}
     const names: Record<string, string> = {};
     
     const idPatterns = [
-      /(?:document\s*)?ID(?:\s*is)?:\s*["']?([a-zA-Z0-9_-]{10,})["']?/gi,
-      /"(?:id|documentId|spreadsheetId|fileId|eventId|calendarId)"\s*:\s*"([^"]+)"/gi,
+      /(?:^|[^\w])([a-zA-Z0-9_-]{8,})\s*`([a-zA-Z0-9_-]{8,})`/gi,
+      /`([a-zA-Z0-9_-]{10,})`/gi,
+      
+      /(?:I have|found|retrieved|got|obtained)\s+(?:the\s+)?(?:(\w+(?:\s+\w+)*)\s+)?(?:ID|id|Id):\s*["'`]?([a-zA-Z0-9_-]{8,})["'`]?/gi,
+      /(?:(\w+(?:\s+\w+)*)\s+)?(?:ID|id|Id)(?:\s*is)?:\s*["'`]?([a-zA-Z0-9_-]{8,})["'`]?/gi,
+      
+      /"(\w*[iI]d\w*)"\s*:\s*"([a-zA-Z0-9_-]{8,})"/gi,
+      /"id"\s*:\s*"([a-zA-Z0-9_-]{8,})"/gi,
+      
+      /(\w+(?:\s+\w+)*)\s*(?:ID|id|Id|Token|Key|Code)\s*:\s*["'`]?([a-zA-Z0-9_-]{8,})["'`]?/gi,
+      
+      /(?:^|[^\w])ID(?:\s*is)?:\s*["'`]?([a-zA-Z0-9_-]{10,})["'`]?/gi,
     ];
     
     const namePatterns = [
-      /(?:title|name|label|subject|displayName)(?:\s*is)?:\s*["']([^"']+)["']/gi,
-      /"(?:title|name|label|subject|displayName|documentName|spreadsheetName|fileName)"\s*:\s*"([^"]+)"/gi,
+      /(?:created|found|retrieved|named|called)\s+(?:.*?\s+)?["'`]([^"'`]{3,})["'`]/gi,
+      /(?:title|name|label|subject|displayName)(?:\s*is)?:\s*["'`]([^"'`]{3,})["'`]/gi,
+      /"(?:title|name|label|subject|displayName|.*Name)"\s*:\s*"([^"]{3,})"/gi,
+      /name:\s*["']([^"']{3,})["']/gi,
     ];
     
     for (const pattern of idPatterns) {
       let match;
       while ((match = pattern.exec(text)) !== null) {
-        const id = match[1];
-        if (id && id.length >= 10) {
-          if (text.toLowerCase().includes('document')) {
-            ids.documentId = id;
-          } else if (text.toLowerCase().includes('spreadsheet')) {
-            ids.spreadsheetId = id;
-          } else if (text.toLowerCase().includes('event')) {
-            ids.eventId = id;
-          } else if (text.toLowerCase().includes('calendar')) {
-            ids.calendarId = id;
-          } else {
-            ids.id = id;
-          }
+        let idKey = 'id';
+        let idValue = '';
+        
+        if (match.length === 3 && match[1] && match[2]) {
+          const keyPart = match[1].toLowerCase().trim();
+          idValue = match[2];
+          
+          if (keyPart.includes('cloud')) idKey = keyPart.replace(/\s+/g, '') + 'Id';
+          else if (keyPart.includes('account')) idKey = 'accountId';
+          else if (keyPart.includes('user')) idKey = 'userId';
+          else if (keyPart.includes('project')) idKey = 'projectId';
+          else if (keyPart.includes('workspace')) idKey = 'workspaceId';
+          else if (keyPart.includes('organization')) idKey = 'organizationId';
+          else if (keyPart.includes('team')) idKey = 'teamId';
+          else if (keyPart.includes('api')) idKey = 'apiKey';
+          else if (keyPart.includes('access')) idKey = 'accessToken';
+          else if (keyPart.includes('auth')) idKey = 'authToken';
+          else if (keyPart) idKey = keyPart.replace(/\s+/g, '') + 'Id';
+        } else if (match[1]) {
+          idValue = match[1];
+        }
+        
+        if (idValue && idValue.length >= 8) {
+          ids[idKey] = idValue;
+          console.log(`[Manual Extraction] Found ID: ${idKey} = ${idValue}`);
         }
       }
     }
@@ -519,31 +568,64 @@ ${outputText || "No text output."}
       let match;
       while ((match = pattern.exec(text)) !== null) {
         const name = match[1];
-        if (name && name.trim()) {
-          if (text.toLowerCase().includes('document')) {
-            names.documentName = name;
-          } else if (text.toLowerCase().includes('spreadsheet')) {
-            names.spreadsheetName = name;
-          } else if (text.toLowerCase().includes('event')) {
-            names.eventName = name;
-          } else if (text.toLowerCase().includes('file')) {
-            names.fileName = name;
-          } else {
-            names.name = name;
-          }
+        if (name && name.trim() && name.length >= 3) {
+          let nameKey = 'name';
+          
+          const lowerText = text.toLowerCase();
+          if (lowerText.includes('document')) nameKey = 'documentName';
+          else if (lowerText.includes('spreadsheet')) nameKey = 'spreadsheetName';
+          else if (lowerText.includes('file')) nameKey = 'fileName';
+          else if (lowerText.includes('project')) nameKey = 'projectName';
+          else if (lowerText.includes('workspace')) nameKey = 'workspaceName';
+          else if (lowerText.includes('repository')) nameKey = 'repositoryName';
+          else if (lowerText.includes('folder')) nameKey = 'folderName';
+          else if (lowerText.includes('event')) nameKey = 'eventName';
+          else if (lowerText.includes('calendar')) nameKey = 'calendarName';
+          else if (lowerText.includes('task')) nameKey = 'taskName';
+          else if (lowerText.includes('issue')) nameKey = 'issueName';
+          
+          names[nameKey] = name.trim();
+          console.log(`[Manual Extraction] Found name: ${nameKey} = ${name.trim()}`);
         }
       }
     }
     
     return { ids, names };
   }
+  
+  async handleRateLimitIfNeeded(
+    error: string, 
+    output: string, 
+    action?: ModelDefinition
+  ): Promise<'retry' | 'abort' | null> {
+    if (!this.rateLimitManager.isRateLimitError(error, output)) {
+      return null; 
+    }
+
+    const platform = action?.connectionPlatform || 'Unknown Platform';
+    console.log(chalk.red(`   🚨 Rate limit detected for ${platform}`));
+    
+    const decision = await this.rateLimitManager.handleRateLimit(
+      platform,
+      error,
+      output,
+      action?.path
+    );
+    
+    return decision;
+  }
+
+  close(): void {
+    this.rateLimitManager.close();
+  }
   async executeSmartTask(
     taskPrompt: string,
     threadId?: string,
     action?: ModelDefinition,
     context?: ExecutionContext,
-    attemptNumber: number = 1
-  ): Promise<{ success: boolean; output?: any; error?: string; extractedData?: any; analysisReason?: string; agentResponse?: string; isPermissionError?: boolean; conversationTurns?: number }> {
+    attemptNumber: number = 1,
+    strategy?: string
+  ): Promise<{ success: boolean; output?: any; error?: string; extractedData?: any; analysisReason?: string; agentResponse?: string; isPermissionError?: boolean; conversationTurns?: number; isRateLimitError?: boolean }> {
     const startTime = Date.now();
     console.log(chalk.blue('   🚀 Starting unified smart execution...'));
     
@@ -557,16 +639,13 @@ ${outputText || "No text output."}
     conversationState = this.conversationHandler.addTurn(conversationState, 'user', currentPrompt);
     
     while (!this.conversationHandler.isConversationComplete([], conversationState)) {
-      console.log(chalk.gray(`   📨 Turn ${conversationState.turnCount + 1}/5...`));
+      console.log(chalk.gray(`   📨 Turn ${conversationState.turnCount + 1}/3...`));
       
       try {
         const result = await this.agent.generate(currentPrompt, {
           threadId: conversationThreadId,
           resourceId: action?._id || `resource-${Date.now()}`
         });
-        
-        console.log(chalk.gray('   ⏳ Waiting for Pica agent to complete...'));
-        await new Promise(resolve => setTimeout(resolve, 5000));
         
         const outputText = result.text || "";
         const toolResults = result.toolResults || [];
@@ -649,17 +728,17 @@ ${outputText || "No text output."}
       const inputTokens = this.logger.estimateTokens(allPrompts);
       const outputTokens = this.logger.estimateTokens(finalResult.output);
       
-      this.logger.logExecution({
-        platform: action.connectionPlatform,
-        model: action.modelName,
-        action: action.actionName,
-        actionId: action._id,
-        attempt: 1,
-        prompt: {
-          strategy: 'conversation',
-          length: allPrompts.length,
-          content: taskPrompt.substring(0, 200) + '...'
-        },
+        this.logger.logExecution({
+          platform: action.connectionPlatform,
+          model: action.modelName,
+          action: action.actionName,
+          actionId: action._id,
+          attempt: 1,
+          prompt: {
+            strategy: strategy || 'conversational',
+            length: allPrompts.length,
+            content: taskPrompt.substring(0, 200) + '...'
+          },
         response: {
           success: analysis.success,
           error: analysis.success ? undefined : analysis.reason,
@@ -694,12 +773,12 @@ ${outputText || "No text output."}
       conversationTurns: conversationState.turnCount
     };
   }
-
   async executeTask(
     taskPrompt: string,
     threadId?: string,
     action?: ModelDefinition,
-    attemptNumber: number = 1
+    attemptNumber: number = 1,
+    strategy?: string
   ): Promise<{ success: boolean; output?: any; error?: string; extractedData?: any; analysisReason?: string; agentResponse?: string; isPermissionError?: boolean }> {
     const startTime = Date.now();
     const knowledgeSeparator = '\n\n---\n';
@@ -710,8 +789,6 @@ ${outputText || "No text output."}
         threadId: threadId || `test-${Date.now()}`,
         resourceId: `resource-${Date.now()}`
       });
-    console.log(chalk.gray('   ⏳ Waiting for Pica agent to complete...'));
-    await new Promise(resolve => setTimeout(resolve, 5000));
       const outputText = result.text || "";
       const toolResults = result.toolResults || [];
 
@@ -729,7 +806,7 @@ ${outputText || "No text output."}
           actionId: action._id,
           attempt: attemptNumber,
           prompt: {
-            strategy: 'adaptive',
+            strategy: strategy || 'conversational',
             length: taskPrompt.length,
             content: promptForDisplay
           },

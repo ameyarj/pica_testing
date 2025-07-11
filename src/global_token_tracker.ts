@@ -23,7 +23,6 @@ export class GlobalTokenTracker {
   private readonly pricing: Record<string, ModelPricing> = {
     'claude-sonnet-4-20250514': { input: 0.003, output: 0.015 },
     'gpt-4o': { input: 0.005, output: 0.015 },
-    'gpt-4o-search-preview': { input: 0.0025, output: 0.010 },
     'gpt-4.1': { input: 0.02, output: 0.008 },
   };
 
@@ -75,8 +74,6 @@ export class GlobalTokenTracker {
       if (model.includes('sonnet')) {
         normalizedModel = 'claude-sonnet-4-20250514';
       }
-    } else if (model.includes('gpt-4o-search')) {
-      normalizedModel = 'gpt-4o-search-preview';
     } else if (model.includes('gpt-4o')) {
       normalizedModel = 'gpt-4o';
     } else if (model.includes('gpt-4')) {

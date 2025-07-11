@@ -27,12 +27,22 @@ async function main() {
 
   let orchestrator: EnhancedPicaosTestingOrchestrator | null = null;
 
-  process.on('SIGINT', () => {
-    console.log(chalk.yellow('\n\nCaught interrupt signal (Ctrl+C). Generating final report...'));
+  process.on('SIGINT', async () => {
+    console.log(chalk.yellow('\n\nCaught interrupt signal (Ctrl+C). Saving state and generating final report...'));
+    
     if (orchestrator) {
-      orchestrator.handleInterrupt(); 
+      try {
+        await orchestrator.handleInterrupt();
+        console.log(chalk.green('✅ State saved successfully'));
+      } catch (error) {
+        console.error(chalk.red('❌ Error saving state:', error));
+      }
     }
-    process.exit(0); 
+    
+    setTimeout(() => {
+      console.log(chalk.yellow('Exiting...'));
+      process.exit(0);
+    }, 3000);
   });
 
   try {
@@ -42,6 +52,15 @@ async function main() {
 
   } catch (error) {
     console.error(chalk.red.bold('\n💥 An unhandled error occurred during orchestration:'), error);
+  } finally {
+    if (orchestrator) {
+      try {
+        orchestrator.cleanup();
+      } catch (cleanup_error) {
+        console.error(chalk.yellow('Warning: Error during cleanup:', cleanup_error));
+      }
+    }
+    console.log(chalk.cyan('\n👋 Enhanced test suite finished.'));
   }
 }
 

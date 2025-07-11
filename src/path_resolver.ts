@@ -1,4 +1,4 @@
-import { ExecutionContext } from './interface';
+import { ExecutionContext } from './interfaces/interface';
 import { resolvePathParameters } from './utils/pathUtils';
 
 export class PathParameterResolver {

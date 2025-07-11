@@ -1,6 +1,6 @@
-import { generateText, generateObject } from "ai";
+import { generateObject } from "ai";
 import { z } from 'zod';
-import { ModelDefinition, ExecutionContext } from './interface';
+import { ModelDefinition, ExecutionContext } from './interfaces/interface';
 import { LanguageModel } from "ai";
 import { 
   PromptGenerationContext, 
@@ -8,7 +8,7 @@ import {
   PromptPattern,
   PromptLearningData,
   PromptStrategy 
-} from './interface';
+} from './interfaces/interface';
 import { initializeModel } from './utils/modelInitializer';
 import { trackLLMCall } from './utils/tokenTrackerUtils';
 import { EnhancedContextManager } from './enhanced_context_manager';
@@ -196,6 +196,10 @@ export class EnhancedPromptGenerator {
     
     return `You are a real user of ${platform}, a ${useCase} platform. Generate natural prompts that actual users would type.
 
+CRITICAL PLATFORM REQUIREMENT:
+🚨 EVERY GENERATED PROMPT MUST EXPLICITLY MENTION "${platform}" TO ENSURE CORRECT PLATFORM SELECTION 🚨
+This is essential because the user may have multiple platforms connected, and the agent must use the correct one.
+
 CRITICAL CONTEXT AWARENESS:
 ${this.buildContextSection(context)}
 
@@ -210,24 +214,31 @@ STYLE GUIDELINES:
 - Tone: ${tone} (${this.getToneDescription(tone)})
 
 PROMPT GENERATION RULES:
-1. Write like a REAL USER, not a tester or developer
-2. Use names from context (e.g., "Sarah" not "userId")
-3. Reference previous actions naturally ("the product we just created")
-4. Include realistic business scenarios
-5. Use platform-specific terminology naturally
-6. Make it conversational, like continuing a chat
-7. Don't mention technical IDs unless absolutely necessary
-8. Focus on business value, not technical operations
+1. **MANDATORY**: Every prompt MUST include "${platform}" explicitly
+2. Write like a REAL USER, not a tester or developer
+3. Use names from context (e.g., "Sarah" not "userId")
+4. Reference previous actions naturally ("the product we just created")
+5. Include realistic business scenarios
+6. Use platform-specific terminology naturally
+7. Make it conversational, like continuing a chat
+8. Don't mention technical IDs unless absolutely necessary
+9. Focus on business value, not technical operations
 
 EXAMPLES OF GOOD VS BAD PROMPTS:
 ❌ Bad: "Execute GETMANY operation on products"
-✅ Good: "Show me all the products in my catalog"
+✅ Good: "Show me all the products in my ${platform} catalog"
 
 ❌ Bad: "Create a user record with userId and email parameters"
-✅ Good: "Add Sarah Johnson from Marketing to my team with email sarah@company.com"
+✅ Good: "Add Sarah Johnson from Marketing to my ${platform} team with email sarah@company.com"
 
 ❌ Bad: "Update record ID 12345 with new data"
-✅ Good: "Update Sarah's job title to Senior Marketing Manager"`;
+✅ Good: "Update Sarah's job title to Senior Marketing Manager in ${platform}"
+
+❌ Bad: "Show me my API token details"
+✅ Good: "Show me my ${platform} API token details"
+
+❌ Bad: "Send an email to john@example.com"
+✅ Good: "Send an email to john@example.com using ${platform}"`;
   }
 
   private buildUserPrompt(
@@ -267,17 +278,17 @@ Generate a prompt that a real ${context.platformContext.useCase} user would type
     let section = "";
     
     if (context.executionContext.availableIds && context.executionContext.availableIds.size > 0) {
-      section += "AVAILABLE RESOURCES (use these, don't ask for them):\n";
+      section += "CRITICAL: Use these exact values in your prompts - DO NOT ask user for them:\n";
       for (const [key, values] of context.executionContext.availableIds.entries()) {
         const idList = Array.isArray(values) ? values : [values];
-        section += `- ${key}: "${idList[0]}" (already exists)\n`;
+        section += `- ${key}: "${idList[0]}" (MUST include this in prompts naturally)\n`;
       }
     }
 
     if (context.executionContext.availableNames && context.executionContext.availableNames.size > 0) {
-      section += "\nAVAILABLE NAMES (prefer these over IDs):\n";
+      section += "\nAVAILABLE NAMES (weave these into prompts naturally):\n";
       for (const [key, name] of context.executionContext.availableNames.entries()) {
-        section += `- ${key}: "${name}"\n`;
+        section += `- ${key}: "${name}" (use this human-readable name)\n`;
       }
     }
 
@@ -343,13 +354,13 @@ Flow: ${history.conversationFlow}`;
     if (actionName.includes('create')) {
       prompt = `Create a new ${modelName} in ${platform}`;
     } else if (actionName.includes('list') || actionName.includes('get')) {
-      prompt = `Show me my ${modelName}s`;
+      prompt = `Show me my ${modelName}s in ${platform}`;
     } else if (actionName.includes('update')) {
-      prompt = `Update the ${modelName}`;
+      prompt = `Update the ${modelName} in ${platform}`;
     } else if (actionName.includes('delete')) {
-      prompt = `Delete the ${modelName}`;
+      prompt = `Delete the ${modelName} in ${platform}`;
     } else {
-      prompt = `Help me with ${action.title.toLowerCase()}`;
+      prompt = `Help me with ${action.title.toLowerCase()} in ${platform}`;
     }
 
     if (context.executionContext.availableNames?.size > 0) {
@@ -360,7 +371,7 @@ Flow: ${history.conversationFlow}`;
     return {
       prompt,
       confidence: 0.5,
-      reasoning: "Fallback prompt generated due to LLM failure",
+      reasoning: "Fallback prompt generated due to LLM failure - includes platform name for correct platform selection",
       alternativePrompts: [prompt],
       contextUsed: [],
       suggestedTestData: {}

@@ -1,4 +1,4 @@
-import { ExecutionContext } from '../interface';
+import { ExecutionContext } from '../interfaces/interface';
 
 export interface PathResolution {
   resolvedPath: string;

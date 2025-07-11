@@ -38,6 +38,9 @@ interface LogEntry {
     component?: string;  
   };
   duration: number;
+  batchNumber?: number;
+  actionRange?: string;
+  totalBatches?: number;
 }
 
 export class ExecutionLogger {
@@ -46,6 +49,7 @@ export class ExecutionLogger {
   private sessionId: string;
   private totalCost: number = 0;
   private modelUsage: Map<string, { tokens: number; cost: number }> = new Map();
+  private batchMetadata: { batchNumber?: number; actionRange?: string; totalBatches?: number } = {};
 
   private isRealAction(action: string): boolean {
     return !action.includes('-prompt-generation') && 
@@ -55,46 +59,64 @@ export class ExecutionLogger {
   }
 
   constructor(platformName?: string) {
-    const now = new Date();
-    const istOffset = 5.5 * 60 * 60 * 1000; 
-    const istTime = new Date(now.getTime() + istOffset);
-    const timeStr = istTime.toISOString().replace(/:/g, '-').replace(/\..+/, '').replace('T', ' - ');
-    
     if (!platformName) {
       throw new Error('Platform name is required for ExecutionLogger');
     }
+    
     const safePlatformName = platformName.replace(/[^a-zA-Z0-9\s-]/g, '_');
-    this.sessionId = `${safePlatformName} - ${timeStr}`; 
+    this.sessionId = safePlatformName;
     
     this.logDir = path.join(process.cwd(), 'logs');
     if (!fs.existsSync(this.logDir)) {
       fs.mkdirSync(this.logDir, { recursive: true });
     }
-    this.currentLogFile = path.join(this.logDir, `${this.sessionId}.json`);
+    
+    this.currentLogFile = path.join(this.logDir, `${safePlatformName}.json`);
     this.initializeLogFile();
   }
 
+  setBatchMetadata(batchNumber: number, actionRange: string, totalBatches: number): void {
+  this.batchMetadata = { batchNumber, actionRange, totalBatches };
+}
+
   private initializeLogFile(): void {
-    const header = {
-      sessionId: this.sessionId,
-      startTime: new Date().toISOString(),
-      entries: []
-    };
-    fs.writeFileSync(this.currentLogFile, JSON.stringify(header, null, 2));
+    if (!fs.existsSync(this.currentLogFile)) {
+      const header = {
+        sessionId: this.sessionId,
+        startTime: new Date().toISOString(),
+        entries: []
+      };
+      fs.writeFileSync(this.currentLogFile, JSON.stringify(header, null, 2));
+    } else {
+      try {
+        const logData = JSON.parse(fs.readFileSync(this.currentLogFile, 'utf-8'));
+        logData.lastSessionStart = new Date().toISOString();
+        fs.writeFileSync(this.currentLogFile, JSON.stringify(logData, null, 2));
+        console.log(chalk.blue(`   📄 Appending to existing log file for ${this.sessionId}`));
+      } catch (error) {
+        console.error(chalk.yellow(`   ⚠️ Could not read existing log file, creating new one`));
+        const header = {
+          sessionId: this.sessionId,
+          startTime: new Date().toISOString(),
+          entries: []
+        };
+        fs.writeFileSync(this.currentLogFile, JSON.stringify(header, null, 2));
+      }
+    }
   }
 
   logExecution(entry: Omit<LogEntry, 'timestamp' | 'sessionId'>): void {
-    const fullPrompt = entry.prompt.content;
-    const promptPreview = fullPrompt.substring(0, 200) + (fullPrompt.length > 200 ? '...' : '');
-    
+    const fullPrompt = entry.prompt.content;    
     const fullEntry: LogEntry = {
       ...entry,
       timestamp: new Date().toISOString(),
       sessionId: this.sessionId,
+      batchNumber: this.batchMetadata.batchNumber,
+      actionRange: this.batchMetadata.actionRange,
+      totalBatches: this.batchMetadata.totalBatches,
       prompt: {
         ...entry.prompt,
-        content: promptPreview,
-        fullContent: fullPrompt  
+        content: fullPrompt,
       }
     };
 
@@ -191,24 +213,18 @@ export class ExecutionLogger {
     }>();
 
     for (const entry of entries) {
-      if (!this.isRealAction(entry.action)) {
-        continue; 
-      }
-      
       const key = `${entry.actionId}`;
       const existing = actionDetailsMap.get(key);
       
-      if (!existing || !existing.success) {
-        actionDetailsMap.set(key, {
-          title: entry.action,
-          modelName: entry.model,
-          success: entry.response.success,
-          attempts: existing ? existing.attempts + 1 : 1,
-          finalStrategy: entry.prompt.strategy,
-          error: entry.response.error,
-          passNumber: existing ? 2 : 1
-        });
-      }
+      actionDetailsMap.set(key, {
+        title: entry.action,
+        modelName: entry.model,
+        success: entry.response.success,
+        attempts: existing ? existing.attempts + 1 : 1,
+        finalStrategy: entry.prompt.strategy,
+        error: entry.response.error,
+        passNumber: existing && !existing.success && entry.response.success ? 2 : 1
+      });
     }
 
     const successfulActions = Array.from(actionDetailsMap.values()).filter(a => a.success);
@@ -224,8 +240,24 @@ export class ExecutionLogger {
     summary += `| **Failed** | ${failedActions.length} ❌ |\n`;
     summary += `| **Success Rate** | ${successRate}% |\n\n`;
 
-    const pass1Success = successfulActions.filter(a => a.passNumber === 1).length;
-    const pass2Success = successfulActions.filter(a => a.passNumber === 2).length;
+    const actionPassMap = new Map<string, { pass1Success: boolean; pass2Success: boolean; attempts: number }>();
+    
+    for (const entry of entries) {
+      const key = `${entry.actionId}`;
+      const existing = actionPassMap.get(key) || { pass1Success: false, pass2Success: false, attempts: 0 };
+      
+      existing.attempts++;
+      if (existing.attempts === 1 && entry.response.success) {
+        existing.pass1Success = true;
+      } else if (existing.attempts > 1 && entry.response.success && !existing.pass1Success) {
+        existing.pass2Success = true;
+      }
+      
+      actionPassMap.set(key, existing);
+    }
+    
+    const pass1Success = Array.from(actionPassMap.values()).filter(a => a.pass1Success).length;
+    const pass2Success = Array.from(actionPassMap.values()).filter(a => a.pass2Success).length;
     
     summary += '### Pass-by-Pass Breakdown\n\n';
     summary += `- **Pass 1:** ${pass1Success} successes on first attempt\n`;
@@ -233,11 +265,11 @@ export class ExecutionLogger {
 
     const strategyMap = new Map<string, { total: number; success: number }>();
     for (const entry of entries) {
-      if (!this.isRealAction(entry.action)) {
-        continue; 
+      let strategy = entry.prompt.strategy;
+      if (strategy === 'conversation') {
+        strategy = 'conversational';
       }
       
-      const strategy = entry.prompt.strategy;
       const current = strategyMap.get(strategy) || { total: 0, success: 0 };
       current.total++;
       if (entry.response.success) current.success++;
@@ -315,7 +347,6 @@ export class ExecutionLogger {
       'claude-sonnet-4-20250514': { input: 0.003, output: 0.015 },
       'gpt-4.1': { input: 0.002, output: 0.008 },  
       'gpt-4o': { input: 0.005, output: 0.015 },
-      'gpt-4o-search-preview': { input: 0.0025, output: 0.010 },
     };
     
     const modelPricing = pricing[model] || pricing['gpt-4.1'];

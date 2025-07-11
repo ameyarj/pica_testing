@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { ConnectionDefinition, ModelDefinition } from '../interface';
+import { ConnectionDefinition, ModelDefinition } from '../interfaces/interface';
 
 const PICA_DEV_API_BASE_URL = 'https://development-api.picaos.com/v1';
 
