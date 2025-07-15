@@ -18,6 +18,9 @@ export interface BatchContext {
 export class ContextPersistenceManager {
   private contextDir: string;
   private compressor: ContextCompressor;
+  private lastIncrementalSave: Map<string, number> = new Map();
+  private incrementalSaveInterval: number = 30000; 
+  private actionsPerCheckpoint: number = 10; 
 
   constructor() {
     this.contextDir = path.join(process.cwd(), 'logs', 'contexts');
@@ -326,6 +329,144 @@ export class ContextPersistenceManager {
     if (fs.existsSync(contextFile)) {
       fs.unlinkSync(contextFile);
       console.log(chalk.yellow(`   🗑️ Deleted context for batch ${batchNumber}`));
+    }
+  }
+
+  saveIncrementalContext(
+    platform: string,
+    batchNumber: number,
+    context: ExecutionContext,
+    actionIndex: number,
+    totalActions: number
+  ): void {
+    const now = Date.now();
+    const key = `${platform}_${batchNumber}`;
+    const lastSave = this.lastIncrementalSave.get(key) || 0;
+    
+    const shouldSaveByTime = (now - lastSave) > this.incrementalSaveInterval;
+    const shouldSaveByActions = (actionIndex % this.actionsPerCheckpoint) === 0;
+    
+    if (shouldSaveByTime || shouldSaveByActions || actionIndex === totalActions - 1) {
+      this.saveCheckpoint(platform, batchNumber, context, actionIndex, totalActions);
+      this.lastIncrementalSave.set(key, now);
+    }
+  }
+
+  private saveCheckpoint(
+    platform: string,
+    batchNumber: number,
+    context: ExecutionContext,
+    actionIndex: number,
+    totalActions: number
+  ): void {
+    const checkpointFile = this.getCheckpointFilename(platform, batchNumber, actionIndex);
+    
+    const checkpoint = {
+      platform,
+      batchNumber,
+      actionIndex,
+      totalActions,
+      timestamp: new Date().toISOString(),
+      context: this.serializeContext(context),
+      progress: Math.round((actionIndex / totalActions) * 100)
+    };
+
+    try {
+      fs.writeFileSync(checkpointFile, JSON.stringify(checkpoint, null, 2));
+      console.log(chalk.blue(`   💾 Checkpoint saved at action ${actionIndex}/${totalActions} (${checkpoint.progress}%)`));
+    } catch (error) {
+      console.error(chalk.red(`   ❌ Failed to save checkpoint: ${error}`));
+    }
+  }
+
+  loadLatestCheckpoint(platform: string, batchNumber: number): {
+    context: ExecutionContext;
+    actionIndex: number;
+    totalActions: number;
+  } | null {
+    const checkpointFiles = this.getCheckpointFiles(platform, batchNumber);
+    if (checkpointFiles.length === 0) return null;
+
+    const latestFile = checkpointFiles[checkpointFiles.length - 1];
+    const checkpointPath = path.join(this.contextDir, latestFile);
+
+    try {
+      const checkpoint = JSON.parse(fs.readFileSync(checkpointPath, 'utf-8'));
+      console.log(chalk.cyan(`   📍 Loaded checkpoint from action ${checkpoint.actionIndex}/${checkpoint.totalActions}`));
+      
+      return {
+        context: this.deserializeContext(checkpoint.context),
+        actionIndex: checkpoint.actionIndex,
+        totalActions: checkpoint.totalActions
+      };
+    } catch (error) {
+      console.error(chalk.red(`   ❌ Failed to load checkpoint: ${error}`));
+      return null;
+    }
+  }
+
+  private getCheckpointFiles(platform: string, batchNumber: number): string[] {
+    const safePlatformName = platform.replace(/[^a-zA-Z0-9\s-]/g, '_');
+    const prefix = `${safePlatformName}_batch_${batchNumber}_checkpoint_`;
+    
+    return fs.readdirSync(this.contextDir)
+      .filter(file => file.startsWith(prefix) && file.endsWith('.json'))
+      .sort((a, b) => {
+        const aIndex = parseInt(a.match(/checkpoint_(\d+)\.json$/)?.[1] || '0');
+        const bIndex = parseInt(b.match(/checkpoint_(\d+)\.json$/)?.[1] || '0');
+        return aIndex - bIndex;
+      });
+  }
+
+  private getCheckpointFilename(platform: string, batchNumber: number, actionIndex: number): string {
+    const safePlatformName = platform.replace(/[^a-zA-Z0-9\s-]/g, '_');
+    return path.join(this.contextDir, `${safePlatformName}_batch_${batchNumber}_checkpoint_${actionIndex}.json`);
+  }
+
+  cleanupCheckpoints(platform: string, batchNumber: number): void {
+    const checkpointFiles = this.getCheckpointFiles(platform, batchNumber);
+    let cleanedCount = 0;
+
+    for (const file of checkpointFiles) {
+      const filePath = path.join(this.contextDir, file);
+      try {
+        fs.unlinkSync(filePath);
+        cleanedCount++;
+      } catch (error) {
+        console.error(chalk.red(`   ❌ Failed to cleanup checkpoint ${file}: ${error}`));
+      }
+    }
+
+    if (cleanedCount > 0) {
+      console.log(chalk.yellow(`   🧹 Cleaned up ${cleanedCount} checkpoint files`));
+    }
+  }
+
+  enhancedSaveInterruptState(
+    platform: string,
+    batchNumber: number,
+    executionState: any,
+    context: ExecutionContext
+  ): void {
+    const interruptFile = this.getInterruptContextFilename(platform, batchNumber);
+    
+    const enhancedInterruptData = {
+      ...executionState,
+      timestamp: new Date().toISOString(),
+      context: this.serializeContext(context),
+      recoveryMetadata: {
+        canResume: true,
+        lastAction: executionState.currentActionIndex,
+        completedActions: executionState.executedActions.length,
+        totalActions: executionState.executedActions.length + (executionState.remainingActions || 0)
+      }
+    };
+
+    try {
+      fs.writeFileSync(interruptFile, JSON.stringify(enhancedInterruptData, null, 2));
+      console.log(chalk.green(`   💾 Enhanced interrupt state saved for batch ${batchNumber}`));
+    } catch (error) {
+      console.error(chalk.red(`   ❌ Failed to save enhanced interrupt state: ${error}`));
     }
   }
   saveCompactContext(

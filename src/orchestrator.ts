@@ -56,6 +56,10 @@ export class EnhancedPicaosTestingOrchestrator {
     availableResources: {[key: string]: string[]};
     startTime: number;
   } | null = null;
+  private sessionStartTime: number = 0;
+  private lastCheckpointTime: number = 0;
+  private checkpointInterval: number = 30000; // 30 seconds
+  private isShuttingDown: boolean = false;
 
   constructor(picaSdkSecretKey: string, openAIApiKey: string) {
     this.picaApiService = new PicaApiService(picaSdkSecretKey);
@@ -70,6 +74,7 @@ export class EnhancedPicaosTestingOrchestrator {
 
   public async start(): Promise<void> {
     tokenTracker.reset();
+    this.sessionStartTime = Date.now();
     
     try {
       const connections = await this.picaApiService.getAllConnectionDefinitions();
@@ -83,11 +88,31 @@ export class EnhancedPicaosTestingOrchestrator {
       if (!selectedConnection) return;
 
       console.log(chalk.bold(`\n📊 Selected platform: ${selectedConnection.name}`));
+      
+      this.historyManager.createSessionCheckpoint(selectedConnection.name, {
+        sessionId: `${selectedConnection.name}_${new Date().toISOString().split('T')[0]}`,
+        startTime: this.sessionStartTime,
+        platform: selectedConnection.name,
+        status: 'active'
+      });
+      
       await this.testPlatform(selectedConnection);
 
     } catch (error) {
       console.error("\n💥 An unexpected error occurred in the orchestrator:", error);
+      
+      if (this.currentExecutionState) {
+        this.historyManager.saveGracefulInterrupt(
+          this.currentExecutionState.platform,
+          `Unexpected error: ${error}`,
+          { error: String(error), timestamp: new Date().toISOString() }
+        );
+      }
     } finally {
+      if (!this.isShuttingDown) {
+        await this.gracefulShutdown();
+      }
+      
       tokenTracker.printSummary();
       
       if (this.logger) {
@@ -530,7 +555,6 @@ private async executeBatch(
 
   console.log(chalk.cyan("\n🧩 Analyzing action dependencies..."));
   
-  // Use cached dependency graph from batch manager to avoid duplicate analysis
   let dependencyGraph;
   if (strategy.dependencyGraph) {
     console.log(chalk.green("   ✅ Using cached dependency graph from batch analysis"));
@@ -704,6 +728,56 @@ private async executeBatch(
       console.log(chalk.gray("🧹 Resources cleaned up"));
     } catch (error) {
       console.error(chalk.red("❌ Error during cleanup:"), error);
+    }
+  }
+
+  private async gracefulShutdown(): Promise<void> {
+    this.isShuttingDown = true;
+    
+    try {
+      if (this.currentExecutionState) {
+        await this.saveEnhancedInterruptState();
+        
+        this.historyManager.cleanupSessionCheckpoint(this.currentExecutionState.platform);
+      }
+      this.cleanup();
+      console.log(chalk.green("   ✅ Graceful shutdown completed"));
+    } catch (error) {
+      console.error(chalk.red("   ❌ Error during graceful shutdown:"), error);
+    }
+  }
+
+  private async saveEnhancedInterruptState(): Promise<void> {
+    if (!this.currentExecutionState) return;
+    
+    try {
+      const context = this.contextManager.getContext();
+      const contextPersistence = new (require('./context_persistence_manager').ContextPersistenceManager)();
+      contextPersistence.enhancedSaveInterruptState(
+        this.currentExecutionState.platform,
+        this.currentExecutionState.batchNumber,
+        this.currentExecutionState,
+        context
+      );
+      
+      this.historyManager.saveGracefulInterrupt(
+        this.currentExecutionState.platform,
+        'Graceful shutdown',
+        {
+          progress: {
+            currentBatch: this.currentExecutionState.batchNumber,
+            totalBatches: 1,
+            currentAction: this.currentExecutionState.currentActionIndex,
+            totalActions: this.currentExecutionState.executedActions.length,
+            completedActions: this.currentExecutionState.executedActions.filter(a => a.success).length,
+            elapsedTime: Date.now() - this.currentExecutionState.startTime
+          }
+        }
+      );
+      
+      console.log(chalk.green("   ✅ Enhanced interrupt state saved"));
+    } catch (error) {
+      console.error(chalk.red("   ❌ Failed to save enhanced interrupt state:"), error);
     }
   }
   

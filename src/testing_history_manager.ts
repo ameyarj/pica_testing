@@ -21,6 +21,9 @@ export interface TestingHistory {
 
 export class TestingHistoryManager {
   private historyDir: string;
+  private sessionCheckpoints: Map<string, any> = new Map();
+  private autoSaveInterval: number = 60000; // 1 minute
+  private lastAutoSave: Map<string, number> = new Map();
 
   constructor() {
     this.historyDir = path.join(process.cwd(), 'logs', 'history');
@@ -107,7 +110,7 @@ export class TestingHistoryManager {
     console.log(chalk.cyan(`Total actions completed: ${history.totalActionsCompleted}`));
     console.log(chalk.cyan(`Last updated: ${new Date(history.lastUpdated).toLocaleDateString()}`));
 
-    for (const session of history.sessions.slice(-3)) { // Show last 3 sessions
+    for (const session of history.sessions.slice(-3)) { 
       console.log(chalk.yellow(`\n📅 ${session.date} (${session.totalDuration}):`));
       for (const batch of session.batches) {
         const successRate = batch.actionCount > 0 ? Math.round((batch.successCount / batch.actionCount) * 100) : 0;
@@ -238,5 +241,154 @@ export class TestingHistoryManager {
       fs.unlinkSync(historyFile);
       console.log(chalk.yellow(`   🗑️ Cleared history for ${platform}`));
     }
+  }
+
+  createSessionCheckpoint(platform: string, sessionInfo: any): void {
+    this.sessionCheckpoints.set(platform, {
+      ...sessionInfo,
+      timestamp: new Date().toISOString(),
+      checkpointType: 'session'
+    });
+    
+    this.autoSaveSession(platform);
+  }
+
+  updateSessionProgress(platform: string, progress: {
+    currentBatch: number;
+    totalBatches: number;
+    currentAction: number;
+    totalActions: number;
+    completedActions: number;
+    elapsedTime: number;
+  }): void {
+    const checkpoint = this.sessionCheckpoints.get(platform);
+    if (checkpoint) {
+      checkpoint.progress = progress;
+      checkpoint.lastUpdate = new Date().toISOString();
+      this.sessionCheckpoints.set(platform, checkpoint);
+      
+      this.conditionalAutoSave(platform);
+    }
+  }
+
+  saveGracefulInterrupt(platform: string, interruptReason: string, additionalData?: any): void {
+    const checkpoint = this.sessionCheckpoints.get(platform);
+    if (!checkpoint) return;
+
+    const interruptData = {
+      ...checkpoint,
+      interruptReason,
+      interruptTimestamp: new Date().toISOString(),
+      gracefulShutdown: true,
+      additionalData: additionalData || {}
+    };
+
+    const interruptFile = this.getInterruptFilename(platform);
+    
+    try {
+      fs.writeFileSync(interruptFile, JSON.stringify(interruptData, null, 2));
+      console.log(chalk.green(`   🛑 Graceful interrupt saved: ${interruptReason}`));
+    } catch (error) {
+      console.error(chalk.red(`   ❌ Failed to save graceful interrupt: ${error}`));
+    }
+  }
+
+  loadSessionCheckpoint(platform: string): any | null {
+    const interruptFile = this.getInterruptFilename(platform);
+    
+    if (fs.existsSync(interruptFile)) {
+      try {
+        const data = JSON.parse(fs.readFileSync(interruptFile, 'utf-8'));
+        console.log(chalk.cyan(`   📍 Loaded session checkpoint for ${platform}`));
+        return data;
+      } catch (error) {
+        console.error(chalk.red(`   ❌ Failed to load session checkpoint: ${error}`));
+      }
+    }
+    
+    return this.sessionCheckpoints.get(platform) || null;
+  }
+
+  cleanupSessionCheckpoint(platform: string): void {
+    this.sessionCheckpoints.delete(platform);
+    this.lastAutoSave.delete(platform);
+    
+    const interruptFile = this.getInterruptFilename(platform);
+    if (fs.existsSync(interruptFile)) {
+      try {
+        fs.unlinkSync(interruptFile);
+        console.log(chalk.yellow(`   🧹 Cleaned up session checkpoint for ${platform}`));
+      } catch (error) {
+        console.error(chalk.red(`   ❌ Failed to cleanup session checkpoint: ${error}`));
+      }
+    }
+  }
+
+  getRecoveryInfo(platform: string): {
+    canRecover: boolean;
+    lastCheckpoint?: any;
+    recoverySuggestions: string[];
+  } {
+    const checkpoint = this.loadSessionCheckpoint(platform);
+    const suggestions: string[] = [];
+    
+    if (!checkpoint) {
+      return {
+        canRecover: false,
+        recoverySuggestions: ['No checkpoint found', 'Start fresh session']
+      };
+    }
+
+    if (checkpoint.gracefulShutdown) {
+      suggestions.push('Graceful shutdown detected');
+      suggestions.push('Can resume from last checkpoint');
+    } else {
+      suggestions.push('Unexpected interruption detected');
+      suggestions.push('Validate last action before resuming');
+    }
+
+    if (checkpoint.progress) {
+      const { currentBatch, totalBatches, currentAction, totalActions } = checkpoint.progress;
+      suggestions.push(`Resume from batch ${currentBatch}/${totalBatches}, action ${currentAction}/${totalActions}`);
+    }
+
+    return {
+      canRecover: true,
+      lastCheckpoint: checkpoint,
+      recoverySuggestions: suggestions
+    };
+  }
+
+  private autoSaveSession(platform: string): void {
+    const checkpoint = this.sessionCheckpoints.get(platform);
+    if (!checkpoint) return;
+
+    const sessionFile = this.getSessionFilename(platform);
+    
+    try {
+      fs.writeFileSync(sessionFile, JSON.stringify(checkpoint, null, 2));
+      this.lastAutoSave.set(platform, Date.now());
+    } catch (error) {
+      console.error(chalk.red(`   ❌ Failed to auto-save session: ${error}`));
+    }
+  }
+
+  private conditionalAutoSave(platform: string): void {
+    const now = Date.now();
+    const lastSave = this.lastAutoSave.get(platform) || 0;
+    
+    if ((now - lastSave) > this.autoSaveInterval) {
+      this.autoSaveSession(platform);
+    }
+  }
+
+  private getInterruptFilename(platform: string): string {
+    const safePlatformName = platform.replace(/[^a-zA-Z0-9\s-]/g, '_');
+    return path.join(this.historyDir, `${safePlatformName}_interrupt.json`);
+  }
+
+  private getSessionFilename(platform: string): string {
+    const safePlatformName = platform.replace(/[^a-zA-Z0-9\s-]/g, '_');
+    return path.join(this.historyDir, `${safePlatformName}_session.json`);
   }
 }
