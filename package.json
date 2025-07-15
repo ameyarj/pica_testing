@@ -1,14 +1,20 @@
 {
   "name": "pica_platform_testing",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "dist/main_runner.js",
   "scripts": {
+    "build": "tsc",
+    "start": "node dist/main_runner.js",
+    "dev": "ts-node src/main_runner.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "Pica Platform Testing Application",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
     "@ai-sdk/anthropic": "^1.2.12",
     "@ai-sdk/openai": "^1.3.22",

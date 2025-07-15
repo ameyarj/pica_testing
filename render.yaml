@@ -1,0 +1,20 @@
+services:
+  - type: worker
+    name: pica-platform-testing
+    runtime: node
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PICA_SECRET_KEY
+        sync: false
+      - key: PICA_USER_TOKEN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+    scaling:
+      minInstances: 1
+      maxInstances: 1
