@@ -425,7 +425,7 @@ export class EnhancedContextManager {
     if (context.availableNames && context.availableNames.size > 0) {
       const names = Array.from(context.availableNames.entries())
         .map(([key, name]) => `${key}: "${name}"`)
-        .slice(0, 3); // Show first 3
+        .slice(0, 3); 
       parts.push(`Names: ${names.join(', ')}`);
     }
     

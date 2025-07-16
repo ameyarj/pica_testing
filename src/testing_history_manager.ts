@@ -22,7 +22,7 @@ export interface TestingHistory {
 export class TestingHistoryManager {
   private historyDir: string;
   private sessionCheckpoints: Map<string, any> = new Map();
-  private autoSaveInterval: number = 60000; // 1 minute
+  private autoSaveInterval: number = 60000; 
   private lastAutoSave: Map<string, number> = new Map();
 
   constructor() {

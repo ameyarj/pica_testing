@@ -18,7 +18,6 @@ export function resolvePathParameters(
   const missingParams: string[] = [];
   let resolvedPath = pathTemplate;
 
-  // Handle both {{param}} and :param formats
   const allParams = [
     ...(pathTemplate.match(/\{\{(\w+)\}\}/g) || []).map(p => p.replace(/[{}]/g, '')),
     ...(pathTemplate.match(/:(\w+)/g) || []).map(p => p.substring(1))

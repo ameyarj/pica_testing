@@ -35,7 +35,21 @@ export interface ActionResult {
   analysisReason?: string;
   isPermissionError?: boolean;
   actionId?: string;
+  // Skip-related fields
+  isSkipped?: boolean;
+  skipReason?: string;
+  skipCategory?: 'token-destructive' | 'token-safe' | 'non-token' | 'custom';
+}
 
+export interface SkippedActionInfo {
+  actionId: string;
+  actionTitle: string;
+  modelName: string;
+  platform: string;
+  reason: string;
+  category: 'token-destructive' | 'token-safe' | 'non-token' | 'custom';
+  matchedKeywords: string[];
+  timestamp: string;
 }
 
 export interface ExecutionContext {

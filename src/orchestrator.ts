@@ -4,11 +4,12 @@ import { KnowledgeRefiner } from './knowledge_refiner';
 import { EnhancedContextManager } from './enhanced_context_manager';
 import { EnhancedDependencyAnalyzer } from './dependency_analyzer';
 import { EnhancedPromptGenerator } from './prompt_generator';
-import { ConnectionDefinition, ModelDefinition, ActionResult, ExecutionContext } from './interfaces/interface';
+import { ConnectionDefinition, ModelDefinition, ActionResult, ExecutionContext, SkippedActionInfo } from './interfaces/interface';
 import { PathParameterResolver } from './path_resolver';
 import { ExecutionLogger } from './execution_logger';
 import { BatchManager, ActionSelection, BatchStrategy } from './batch_manager';
 import { TestingHistoryManager } from './testing_history_manager';
+import { TokenActionDetector } from './utils/tokenActionDetector';
 import readline from 'readline/promises';
 import chalk from 'chalk';
 import * as diff from 'diff';
@@ -40,6 +41,8 @@ export class EnhancedPicaosTestingOrchestrator {
   private useLLMPrompts: boolean = true; 
   private batchManager: BatchManager;
   private historyManager: TestingHistoryManager;
+  private tokenDetector: TokenActionDetector;
+  private skippedActions: SkippedActionInfo[] = [];
   private currentExecutionState: {
     platform: string;
     batchNumber: number;
@@ -58,7 +61,7 @@ export class EnhancedPicaosTestingOrchestrator {
   } | null = null;
   private sessionStartTime: number = 0;
   private lastCheckpointTime: number = 0;
-  private checkpointInterval: number = 30000; // 30 seconds
+  private checkpointInterval: number = 30000; 
   private isShuttingDown: boolean = false;
 
   constructor(picaSdkSecretKey: string, openAIApiKey: string) {
@@ -70,6 +73,8 @@ export class EnhancedPicaosTestingOrchestrator {
     this.promptGenerator = new EnhancedPromptGenerator(this.useClaudeModels);
     this.batchManager = new BatchManager(this.useClaudeModels);
     this.historyManager = new TestingHistoryManager();
+    this.tokenDetector = new TokenActionDetector();
+    this.skippedActions = [];
   }
 
   public async start(): Promise<void> {
@@ -800,7 +805,7 @@ private async executeBatch(
       timestamp: new Date().toISOString(),
       executedActions: this.currentExecutionState.executedActions.map(action => ({
         ...action,
-        prompt: action.prompt.substring(0, 500), // Truncate for minimal storage
+        prompt: action.prompt.substring(0, 500), 
         output: action.output.substring(0, 500)
       })),
       availableResources: this.currentExecutionState.availableResources,
@@ -941,6 +946,44 @@ private async executeBatch(
   maxAttempts: number,
   previousError?: string,
 ): Promise<EnhancedActionResult> {
+  const tokenDetectionResult = this.tokenDetector.detectTokenAction(action);
+  if (tokenDetectionResult.shouldSkip) {
+    console.log(chalk.yellow(`   🚫 SKIPPED: Token action detected - ${tokenDetectionResult.reason}`));
+    this.tokenDetector.logDetectionResult(action, tokenDetectionResult);
+    
+    const skippedInfo: SkippedActionInfo = {
+      actionId: action._id,
+      actionTitle: action.title,
+      modelName: action.modelName,
+      platform: action.connectionPlatform,
+      reason: tokenDetectionResult.reason,
+      category: tokenDetectionResult.category,
+      matchedKeywords: tokenDetectionResult.matchedKeywords,
+      timestamp: new Date().toISOString()
+    };
+    
+    this.skippedActions.push(skippedInfo);
+    
+    return {
+      success: false,
+      error: `Skipped - ${tokenDetectionResult.reason}`,
+      originalKnowledge: action.knowledge,
+      finalKnowledge: action.knowledge,
+      attempts: 0,
+      actionTitle: action.title,
+      modelName: action.modelName,
+      extractedData: {},
+      passNumber,
+      strategyUsed: 'skipped',
+      dependenciesMet: true,
+      analysisReason: tokenDetectionResult.reason,
+      actionId: action._id,
+      isSkipped: true,
+      skipReason: tokenDetectionResult.reason,
+      skipCategory: tokenDetectionResult.category
+    };
+  }
+
   let currentKnowledge = action.knowledge;
   let attempts = 0;
   let lastError: string | undefined;
@@ -1217,9 +1260,10 @@ private async executeBatch(
     dependencyGraph: any
   ): void {
     const successes = results.filter(r => r.success);
-    const failures = results.filter(r => !r.success && !r.error?.includes("Skipped") && !r.isPermissionError);
+    const failures = results.filter(r => !r.success && !r.error?.includes("Skipped") && !r.isPermissionError && !r.isSkipped);
     const permissionErrors = results.filter(r => r.isPermissionError);
-    const skipped = results.filter(r => r.error?.includes("Skipped"));
+    const skipped = results.filter(r => r.error?.includes("Skipped") || r.isSkipped);
+    const tokenSkipped = this.skippedActions.filter(s => s.category === 'token-destructive');
     
     const pass1Success = successes.filter(r => r.passNumber === 1);
     const pass2Success = successes.filter(r => r.passNumber === 2);
@@ -1233,6 +1277,10 @@ private async executeBatch(
     console.log(`  Success Rate: ${successRate === 100 ? chalk.green.bold(`${successRate}%`) : 
                                    successRate >= 80 ? chalk.yellow.bold(`${successRate}%`) : 
                                    chalk.red.bold(`${successRate}%`)} (${successes.length}/${totalAttempted})`);
+    
+    if (skipped.length > 0) {
+      console.log(`  Skipped Actions: ${chalk.cyan(`${skipped.length}`)} (${tokenSkipped.length} token-related)`);
+    }
     
     console.log(chalk.bold("\n📈 Pass-by-Pass Breakdown:"));
     console.log(`  Pass 1: ${chalk.green(`${pass1Success.length} successes`)} on first attempt`);
@@ -1266,6 +1314,29 @@ private async executeBatch(
       permissionErrors.forEach(result => {
         console.log(`  • ${result.actionTitle} (${result.modelName})`);
         console.log(chalk.red(`    ${result.analysisReason || result.error}`));
+      });
+    }
+
+    if (this.skippedActions.length > 0) {
+      console.log(chalk.bold.yellow(`\n🚫 Skipped Actions (${this.skippedActions.length}):`));
+      console.log(chalk.gray("These actions were automatically skipped to prevent token-related issues\n"));
+      
+      const skippedByCategory = this.skippedActions.reduce((acc, action) => {
+        acc[action.category] = acc[action.category] || [];
+        acc[action.category].push(action);
+        return acc;
+      }, {} as Record<string, SkippedActionInfo[]>);
+      
+      Object.entries(skippedByCategory).forEach(([category, actions]) => {
+        console.log(chalk.yellow(`  ${category.toUpperCase()} (${actions.length} actions):`));
+        actions.forEach(action => {
+          console.log(`    • ${action.actionTitle} (${action.modelName})`);
+          console.log(chalk.gray(`      Reason: ${action.reason}`));
+          if (action.matchedKeywords.length > 0) {
+            console.log(chalk.gray(`      Keywords: ${action.matchedKeywords.join(', ')}`));
+          }
+        });
+        console.log();
       });
     }
     

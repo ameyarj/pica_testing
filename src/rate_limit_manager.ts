@@ -113,7 +113,7 @@ export class RateLimitManager {
   }
 
   private async getUserChoiceWithTimeout(): Promise<string> {
-    const timeoutMs = 30000; // 30 seconds timeout
+    const timeoutMs = 30000; 
     
     return new Promise<string>((resolve) => {
       let timeoutId: NodeJS.Timeout;

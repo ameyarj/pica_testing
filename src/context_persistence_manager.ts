@@ -576,7 +576,7 @@ export class ContextPersistenceManager {
 
     if (originalSize === 0 && compactSize === 0) return null;
 
-    const effectiveOriginalSize = originalSize || compactSize * 3; // Estimate if original doesn't exist
+    const effectiveOriginalSize = originalSize || compactSize * 3; 
     const reductionPercentage = originalSize > 0 ? Math.round((1 - compactSize / originalSize) * 100) : 0;
 
     return {

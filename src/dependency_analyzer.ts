@@ -107,15 +107,13 @@ private async analyzeChunks(
       
       results.push(chunkResult);
       
-      // Add delay between chunks to prevent API rate limiting
       if (i < chunks.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 2000)); // 2 second delay
+        await new Promise(resolve => setTimeout(resolve, 2000)); 
       }
       
     } catch (error: any) {
       console.error(`Error in chunk analysis:`, error);
       
-      // Create fallback result for failed chunk
       const fallbackResult: ChunkResult = {
         nodes: chunks[i].map(action => ({
           id: action._id,
@@ -141,9 +139,8 @@ private async analyzeChunks(
       
       results.push(fallbackResult);
       
-      // Add longer delay after errors to help with recovery
       if (i < chunks.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 5000)); // 5 second delay after error
+        await new Promise(resolve => setTimeout(resolve, 5000));
       }
     }
   }
@@ -214,13 +211,12 @@ Based on the actions above, create a complete dependency graph with execution pr
     } catch (error: any) {
       retryCount++;
       
-      // Check if it's an overload error (429 or 529)
       const isOverloadError = error.message?.includes('Overloaded') || 
                              error.statusCode === 529 || 
                              error.statusCode === 429;
       
       if (isOverloadError && retryCount <= maxRetries) {
-        const delayMs = Math.pow(2, retryCount) * 1000; // Exponential backoff: 2s, 4s, 8s
+        const delayMs = Math.pow(2, retryCount) * 1000;
         console.log(chalk.yellow(`   ⚠️ API overloaded, retrying in ${delayMs/1000}s... (attempt ${retryCount}/${maxRetries})`));
         await new Promise(resolve => setTimeout(resolve, delayMs));
         continue;

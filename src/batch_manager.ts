@@ -21,7 +21,7 @@ export interface BatchStrategy {
   batchNumber: number;
   isResume?: boolean;
   resumeContext?: any;
-  dependencyGraph?: any; // Cache the dependency graph to avoid re-analysis
+  dependencyGraph?: any; 
 }
 
 export interface BatchInfo {
@@ -39,7 +39,7 @@ export class BatchManager {
   private contextPersistence: ContextPersistenceManager;
   private historyManager: TestingHistoryManager;
   private dependencyAnalyzer: EnhancedDependencyAnalyzer;
-  private cachedDependencyGraph: any = null; // Cache to avoid re-analysis
+  private cachedDependencyGraph: any = null; 
 
   constructor(useClaudeForAnalysis: boolean = true) {
     this.contextPersistence = new ContextPersistenceManager();
@@ -94,7 +94,7 @@ export class BatchManager {
           missingDependencies: [],
           selectedActions,
           batchNumber,
-          dependencyGraph: this.cachedDependencyGraph // Pass cached graph to avoid re-analysis
+          dependencyGraph: this.cachedDependencyGraph 
         };
 
       case 'continue':
@@ -170,7 +170,6 @@ export class BatchManager {
   async sortActionsByDependencies(actions: ModelDefinition[], platform: string): Promise<ModelDefinition[]> {
     try {
       const dependencyGraph = await this.dependencyAnalyzer.analyzeDependencies(actions, platform);
-      // Cache the dependency graph to avoid re-analysis in orchestrator
       this.cachedDependencyGraph = dependencyGraph;
       return this.dependencyAnalyzer.getSortedActions(dependencyGraph, actions);
     } catch (error) {
