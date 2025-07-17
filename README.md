@@ -105,6 +105,7 @@ railway login                      #use connectors@picos.com
 railway link                       
 railway connect                    # choose automated_platform_tester
 railway ssh
+npx ts-node src/main_runner.ts 
 ```
 
 
