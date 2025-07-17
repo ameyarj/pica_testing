@@ -422,7 +422,7 @@ persistRefinedKnowledge(platform: string, batchNumber: number, actionId: string,
     fs.mkdirSync(knowledgeDir, { recursive: true });
   }
 
-  const filename = `batch_${batchNumber}_${actionId.replace(/[^a-zA-Z0-9]/g, '_')}.md`;
+  const filename = `${actionId.replace(/[^a-zA-Z0-9]/g, '_')}.md`;
   const filepath = path.join(knowledgeDir, filename);
   
   const content = `# Refined Knowledge - Batch ${batchNumber}\n\n## Action ID: ${actionId}\n\n${refinedKnowledge}`;
@@ -433,7 +433,7 @@ loadRefinedKnowledge(platform: string, batchNumbers: number[], actionId: string)
   const knowledgeDir = path.join(process.cwd(), 'logs', 'knowledge', platform);
   
   for (const batchNumber of batchNumbers.reverse()) {
-    const filename = `batch_${batchNumber}_${actionId.replace(/[^a-zA-Z0-9]/g, '_')}.md`;
+    const filename = `${actionId.replace(/[^a-zA-Z0-9]/g, '_')}.md`;
     const filepath = path.join(knowledgeDir, filename);
     
     if (fs.existsSync(filepath)) {
@@ -466,7 +466,7 @@ saveAllPendingKnowledge(): void {
         .replace(/[<>:"/\\|?*]/g, '_')
         .replace(/_{2,}/g, '_');
       
-      const filename = `interrupt_${cleanActionId}.md`;
+      const filename = `${cleanActionId}.md`;
       const filepath = path.join(knowledgeDir, filename);
       
       const content = `# Refined Knowledge (Interrupt Save)\n\n## Action ID: ${actionId}\n\n${data.knowledge}`;

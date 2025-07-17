@@ -3,7 +3,7 @@ builder = "NIXPACKS"
 buildCommand = "npm install && npm run build"
 
 [deploy]
-startCommand = "node dist/main_runner.js"
+startCommand = "npm start"
 restartPolicyType = "NEVER"
 
 [environments.production]

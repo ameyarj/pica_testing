@@ -53,6 +53,7 @@ const ExtractedDataSchema = z.object({
 
 type ExtractedData = z.infer<typeof ExtractedDataSchema>;
 
+
 export class EnhancedAgentService {
   private picaClient: Pica;
   private agent!: Agent;
