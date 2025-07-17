@@ -60,9 +60,15 @@ export class ExecutionLogger {
     this.sessionId = safePlatformName;
     
     const isProduction = process.env.NODE_ENV === 'production';
-    this.logDir = isProduction 
-      ? path.join('/data', 'logs')
-      : path.join(process.cwd(), 'logs');
+    const isRailway = process.env.RAILWAY_ENVIRONMENT_NAME;
+    
+    if (isProduction && isRailway) {
+      this.logDir = path.join(process.cwd(), 'data', 'logs');
+    } else if (isProduction) {
+      this.logDir = path.join('/data', 'logs');
+    } else {
+      this.logDir = path.join(process.cwd(), 'logs');
+    }
     
     if (!fs.existsSync(this.logDir)) {
       fs.mkdirSync(this.logDir, { recursive: true });

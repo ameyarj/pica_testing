@@ -1,5 +1,6 @@
 # Dependencies
 node_modules/
+package-lock.json
 
 # Build outputs
 dist/
@@ -45,4 +46,9 @@ Thumbs.db
 /notes.txt
 /notes.txt/
 
-RENDER_DEPLOYMENT_GUIDE.md
+# Railway specific
+.railway/
+railway.json
+
+# Data directory (contains persistent files)
+/data/

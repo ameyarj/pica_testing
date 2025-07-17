@@ -6,6 +6,10 @@
     "build": "tsc",
     "start": "node dist/main_runner.js",
     "dev": "ts-node src/main_runner.ts",
+    "railway:dev": "railway run npm run dev",
+    "railway:start": "railway run npm start",
+    "railway:logs": "railway logs --follow",
+    "railway:connect": "railway connect",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

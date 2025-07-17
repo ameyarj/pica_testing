@@ -23,11 +23,16 @@ export class ContextPersistenceManager {
   private actionsPerCheckpoint: number = 10; 
 
   constructor() {
-    // Use persistent disk in production (Render), fallback to local logs in development
     const isProduction = process.env.NODE_ENV === 'production';
-    this.contextDir = isProduction 
-      ? path.join('/data', 'contexts')
-      : path.join(process.cwd(), 'logs', 'contexts');
+    const isRailway = process.env.RAILWAY_ENVIRONMENT_NAME;
+    
+    if (isProduction && isRailway) {
+      this.contextDir = path.join(process.cwd(), 'data', 'contexts');
+    } else if (isProduction) {
+      this.contextDir = path.join('/data', 'contexts');
+    } else {
+      this.contextDir = path.join(process.cwd(), 'logs', 'contexts');
+    }
     
     if (!fs.existsSync(this.contextDir)) {
       fs.mkdirSync(this.contextDir, { recursive: true });
