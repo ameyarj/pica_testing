@@ -51,13 +51,6 @@ export class ExecutionLogger {
   private modelUsage: Map<string, { tokens: number; cost: number }> = new Map();
   private batchMetadata: { batchNumber?: number; actionRange?: string; totalBatches?: number } = {};
 
-  private isRealAction(action: string): boolean {
-    return !action.includes('-prompt-generation') && 
-           !action.includes('-knowledge-refinement') &&
-           !action.includes('prompt-generation') &&
-           !action.includes('knowledge-refinement');
-  }
-
   constructor(platformName?: string) {
     if (!platformName) {
       throw new Error('Platform name is required for ExecutionLogger');
@@ -66,7 +59,11 @@ export class ExecutionLogger {
     const safePlatformName = platformName.replace(/[^a-zA-Z0-9\s-]/g, '_');
     this.sessionId = safePlatformName;
     
-    this.logDir = path.join(process.cwd(), 'logs');
+    const isProduction = process.env.NODE_ENV === 'production';
+    this.logDir = isProduction 
+      ? path.join('/data', 'logs')
+      : path.join(process.cwd(), 'logs');
+    
     if (!fs.existsSync(this.logDir)) {
       fs.mkdirSync(this.logDir, { recursive: true });
     }

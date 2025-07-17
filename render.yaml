@@ -15,6 +15,10 @@ services:
         sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
+    disk:
+      name: pica-storage
+      mountPath: /data
+      sizeGB: 1
     scaling:
       minInstances: 1
       maxInstances: 1
