@@ -16,9 +16,32 @@ import * as diff from 'diff';
 import * as fs from 'fs';
 import * as path from 'path';
 import { tokenTracker } from './global_token_tracker';
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout
+
+function createRailwayReadlineInterface() {
+  if (process.env.RAILWAY_ENVIRONMENT_NAME) {
+    console.log(chalk.blue('🚂 Creating Railway-compatible readline interface...'));
+  }
+  
+  return readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: true
+  });
+}
+
+let rl = createRailwayReadlineInterface();
+
+rl.on('close', () => {
+  console.log(chalk.yellow('🔄 Readline interface closed, recreating...'));
+  rl = createRailwayReadlineInterface();
+});
+
+rl.on('error', (error) => {
+  console.error(chalk.red('❌ Readline error:', error.message));
+  if (error.message.includes('ERR_USE_AFTER_CLOSE')) {
+    console.log(chalk.blue('🔄 Recreating readline interface...'));
+    rl = createRailwayReadlineInterface();
+  }
 });
 
 interface EnhancedActionResult extends ActionResult {

@@ -4,6 +4,22 @@ import chalk from 'chalk';
 
 dotenv.config();
 
+function setupRailwayTerminal() {
+  if (process.env.RAILWAY_ENVIRONMENT_NAME) {
+    console.log(chalk.blue('🚂 Detected Railway environment - setting up interactive terminal...'));
+    
+    if (process.stdin.setRawMode) {
+      process.stdin.setRawMode(false);
+    }
+    
+    process.stdin.resume();
+    process.stdout.write('\x1b[?1049h');
+    
+    return new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  return Promise.resolve();
+}
+
 async function main() {
   const picaSecretKey = process.env.PICA_SECRET_KEY;
   const openAIApiKey = process.env.OPENAI_API_KEY;
@@ -46,6 +62,8 @@ async function main() {
   });
 
   try {
+    await setupRailwayTerminal();
+    
     orchestrator = new EnhancedPicaosTestingOrchestrator(picaSecretKey, openAIApiKey!);
     
     await orchestrator.start();
