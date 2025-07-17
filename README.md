@@ -1,133 +1,275 @@
-# PicaOS Automated Testing Suite v2.0
+# Pica Platform Testing Suite
 
-An intelligent testing framework that automatically tests all API actions across multiple platforms integrated with PicaOS. The system uses advanced AI models to understand dependencies, generate adaptive prompts, and ensure comprehensive testing coverage with detailed reporting.
+An advanced, intelligent testing framework that automatically tests all API actions across multiple platforms integrated with PicaOS. The system uses sophisticated AI models, batch processing, and context persistence to ensure comprehensive testing coverage with detailed reporting and cost tracking.
 
 ## 🚀 Key Features
 
-### **2-Pass Smart Testing Strategy**
-1. **Pass 1**: Initial execution leveraging an AI-generated dependency graph to run actions in an optimal order
-2. **Pass 2**: A targeted retry pass for failed actions, using enhanced context gathered from successful runs and refined knowledge
+### **Advanced Batch Processing System**
+- **Configurable Batch Sizes**: Choose optimal batch sizes (1-200 actions) for different platform scales
+- **Intelligent Batch Management**: Automatically handles batch sequencing and dependency resolution
+- **Session Persistence**: Resume interrupted batches from exactly where you left off
+- **Progress Tracking**: Real-time progress monitoring with detailed execution state
 
-### **Intelligent Dependency Analysis**
-- Uses AI to automatically detect action dependencies (e.g., a `create` action must precede an `update`)
-- Generates an optimized execution plan with parallelizable groups to increase efficiency
-- Includes a robust rule-based fallback mechanism if AI analysis is not possible
+### **Smart Dependency Analysis**
+- **AI-Powered Dependency Detection**: Uses Claude/GPT models to analyze action dependencies
+- **Chunked Processing**: Handles large action sets through intelligent chunking
+- **Cross-Chunk Dependency Resolution**: Maintains dependencies across different batch chunks
+- **Execution Planning**: Generates optimal execution plans with parallelizable groups
 
-### **Adaptive Prompt Generation**
-- Dynamically creates prompts for the AI agent based on the context, action type, and attempt history
-- Switches between `conversational`, `technical`, `step-by-step`, and `contextual` strategies to overcome failures
-- Learns from previous agent responses to refine prompts for subsequent attempts
+### **Enhanced Context Management**
+- **Session-Aware Context**: Maintains comprehensive context across batch executions
+- **Context Compression**: Automatically compresses large contexts for memory efficiency
+- **Context Persistence**: Saves and loads context between sessions
+- **Resource Tracking**: Tracks all created resources and their extracted IDs
 
-### **Automated Knowledge Refinement**
-- Analyzes execution errors and automatically suggests and applies improvements
-- Saves successfully refined knowledge to the `knowledge/` directory
-- Displays a color-coded `diff` of knowledge changes for transparency
+### **Advanced AI Integration**
+- **Multiple AI Provider Support**: Anthropic Claude, OpenAI GPT models with automatic fallback
+- **Dynamic Model Selection**: Chooses optimal models based on task complexity
+- **Cost Optimization**: Tracks token usage and costs across all AI operations
+- **Rate Limit Management**: Intelligent rate limit handling with user choice options
 
-### **Comprehensive Context Management**
-- Maintains a session-aware context, tracking all created resources and their extracted IDs
-- Automatically injects required IDs and resource data into subsequent dependent actions
+### **Sophisticated Prompt Generation**
+- **LLM-Powered Prompt Generation**: Uses AI to generate human-like, context-aware prompts
+- **Adaptive Prompt Strategies**: Switches between conversational, technical, and contextual approaches
+- **Prompt Pattern Learning**: Learns from successful prompts to improve future generations
+- **Platform-Specific Terminology**: Adapts prompts to platform-specific language and workflows
 
-### **Detailed Logging & Cost Reporting**
-- Generates detailed JSON logs and human-readable Markdown summary reports
-- Includes total estimated cost, token usage per AI model, and success/failure rates per platform
+### **Token Action Detection & Safety**
+- **Automatic Token Action Detection**: Identifies and skips potentially destructive token-related actions
+- **Smart Categorization**: Categorizes actions by risk level (token-destructive, token-sensitive, etc.)
+- **Safety Reporting**: Provides detailed reports on skipped actions and reasons
+
+### **Comprehensive Logging & Reporting**
+- **Multi-Format Logging**: JSON logs, Markdown reports, and real-time console output
+- **Cost Tracking**: Detailed cost analysis per model, component, and operation
+- **Success Analytics**: Track success rates, failure patterns, and improvement metrics
+- **Session History**: Maintain complete history of all testing sessions
+
+### **Production-Ready Features**
+- **Railway Deployment Support**: Configured for cloud deployment with Railway
+- **Graceful Interrupt Handling**: Safely saves state on interruption (Ctrl+C)
+- **Error Recovery**: Comprehensive error handling and recovery mechanisms
+- **Memory Management**: Efficient memory usage with automatic cleanup
 
 ## 📋 Prerequisites
 
-- Node.js v18+ and npm
-- `ts-node` installed globally (`npm install -g ts-node`) or available via npx
-- A PicaOS account with API access
-- **Pica User Token** obtained from your PicaOS dashboard
-- **AI Provider API Keys**:
-  - **Anthropic API Key** (for Claude 4 Sonnet) - recommended
-  - **OpenAI API Key** (for GPT-4o/GPT-4.1) - alternative
+- **Node.js** v18+ and npm
+- **ts-node** installed globally (`npm install -g ts-node`) or available via npx
+- **PicaOS Account** with API access
+- **Required API Keys**:
+  - **Pica User Token** (from PicaOS dashboard)
+  - **Pica Secret Key** (from PicaOS dashboard)
+  - **AI Provider API Key** (at least one):
+    - **Anthropic API Key** (for Claude models) - recommended
+    - **OpenAI API Key** (for GPT models) - alternative/fallback
 
 ## 🔧 Installation
 
 1. **Clone the repository:**
-    ```bash
-    git clone (https://github.com/ameyarj/pica_testing)
-    cd pica_testing
-    ```
+   ```bash
+   git clone https://github.com/pica-com/automated-knowledge-tester
+   ```
 
 2. **Install dependencies:**
-    ```bash
-    npm install
-    ```
+   ```bash
+   npm install
+   ```
 
 3. **Create a `.env` file:**
-    ```env
-    # Required - PicaOS Credentials
-    PICA_SECRET_KEY=your_pica_secret_key
-    PICA_USER_TOKEN=your_pica_user_token
+   ```env
+   # Required - PicaOS Credentials
+   PICA_SECRET_KEY=your_pica_secret_key
+   PICA_USER_TOKEN=your_pica_user_token
 
-    # AI Provider (at least one is required)
-    ANTHROPIC_API_KEY=your_anthropic_api_key  # Recommended
-    OPENAI_API_KEY=your_openai_api_key        # Alternative
-    ```
+   # AI Provider (at least one required)
+   ANTHROPIC_API_KEY=your_anthropic_api_key  # Recommended
+   OPENAI_API_KEY=your_openai_api_key        # Alternative/Fallback
+   ```
 
 ## 🏃 Running the Test Suite
 
+### Development Mode
 ```bash
 npx ts-node src/main_runner.ts
 ```
+
+### Production Build
+```bash
+npm run build
+npm start
+```
+
+### Railway Deployment
+```bash
+railway login                      #use connectors@picos.com
+railway link                       
+railway connect                    # choose automated_platform_tester
+railway ssh
+```
+
 
 ## 📁 Project Structure
 
 ```
 src/
-├── orchestrator.ts            # Main orchestrator managing the 2-pass testing strategy
-├── agent_service.ts          # Service to interact with AI models
-├── dependency_analyzer.ts     # Analyzes action dependencies
-├── prompt_generator.ts       # Generates adaptive prompts
-├── knowledge_refiner.ts      # Refines action knowledge
-├── context_manager.ts        # Manages contextual data
-├── pica_api_service.ts       # Interacts with the PicaOS API
-├── execution_logger.ts       # Handles logging and reporting
-├── enhanced_model_selector.ts # Selects the best AI model
-├── path_resolver.ts          # Resolves dynamic URL parameters
-├── url_validator.ts          # Validates and fixes URLs
-├── interface.ts             # Core TypeScript definitions
-└── main_runner.ts           # Application entry point
+├── main_runner.ts                 # Application entry point
+├── orchestrator.ts                # Main orchestration logic
+├── agent_service.ts               # AI agent service management
+├── batch_manager.ts               # Batch processing and management
+├── enhanced_context_manager.ts    # Context management and persistence
+├── dependency_analyzer.ts         # Action dependency analysis
+├── prompt_generator.ts            # AI-powered prompt generation
+├── knowledge_refiner.ts           # Knowledge refinement system
+├── execution_logger.ts            # Comprehensive logging system
+├── global_token_tracker.ts        # Global token usage tracking
+├── testing_history_manager.ts     # Session history management
+├── context_persistence_manager.ts # Context serialization/storage
+├── conversation_handler.ts        # Conversation flow management
+├── rate_limit_manager.ts          # Rate limiting and retry logic
+├── enhanced_model_selector.ts     # AI model selection logic
+├── platform_usecase_analyzer.ts   # Platform-specific analysis
+├── path_resolver.ts               # Dynamic path parameter resolution
+├── connectors/
+│   └── pica_api_service.ts        # PicaOS API integration
+├── interfaces/
+│   ├── interface.ts               # Core type definitions
+│   ├── compact_context.ts         # Context compression types
+│   └── prompt_generation.ts       # Prompt generation types
+└── utils/
+    ├── tokenTrackerUtils.ts       # Token tracking utilities
+    ├── tokenActionDetector.ts     # Token action detection
+    ├── context_compressor.ts      # Context compression logic
+    ├── resourceExtractor.ts       # Resource extraction utilities
+    ├── pathUtils.ts               # Path manipulation utilities
+    └── modelInitializer.ts        # Model initialization utilities
 ```
 
 ## 🎯 How It Works
 
-1. **Platform Selection**: Choose from available PicaOS platforms
-2. **Dependency Analysis**: AI-powered analysis of action dependencies
-3. **Two-Pass Execution**:
-   - **Pass 1**: Initial execution following dependency graph
-   - **Pass 2**: Context-enhanced retry of failed actions
-4. **Reporting**: Detailed summary reports in `logs/` directory
+### 1. **Platform Selection**
+- Lists all available PicaOS platforms
+- Displays platform statistics and previous testing history
+- Supports platform-specific configuration
+
+### 2. **Batch Configuration**
+- Choose batch size (1-200 actions) based on platform scale
+- Select execution strategy:
+  - **Run all actions**: Fresh dependency-ordered execution
+  - **Continue from last batch**: Resume from previous session
+  - **Test specific range**: Target specific action ranges
+  - **Re-run failed actions**: Retry only previously failed actions
+  - **Custom selection**: Keyword/name-based action selection
+
+### 3. **Dependency Analysis**
+- AI-powered analysis of action dependencies
+- Chunked processing for large action sets
+- Cross-chunk dependency resolution
+- Fallback rule-based analysis
+
+### 4. **Intelligent Execution**
+- **Pass 1**: Dependency-ordered execution with optimal batching
+- **Pass 2**: Enhanced context retry for failed actions
+- **Smart Token Detection**: Automatic skipping of risky token actions
+- **Rate Limit Handling**: Intelligent rate limit management
+
+### 5. **Comprehensive Reporting**
+- Real-time progress monitoring
+- Detailed success/failure analysis
+- Cost tracking and optimization insights
+- Session history and recovery information
 
 ## 🧠 AI Model Support
 
-- **claude-sonnet-4-20250514**: Default model (requires `ANTHROPIC_API_KEY`)
-- **gpt-4o**: Used for large inputs (requires `OPENAI_API_KEY`)
-- **gpt-4.1**: Fallback model (requires `OPENAI_API_KEY`)
+### Primary Models
+- **claude-4-sonnet**: Default model for most operations
+- **gpt-4.1**: OpenAI model for large contexts
+
+### Automatic Model Selection
+- **Task Complexity**: Chooses appropriate model based on task requirements
+- **Token Limits**: Automatically switches models for large inputs
+- **Cost Optimization**: Balances performance with cost efficiency
+- **Fallback Support**: Graceful degradation when primary models unavailable
 
 ## 📊 Understanding the Output
 
-### Execution Indicators
+### Real-time Indicators
 - ✅ **SUCCESS**: Action completed successfully
-- ❌ **FAILED**: Action failed with reason
-- ⛔ **Permission Error**: Will not be retried
-- 💡 **Refining**: Improving strategy for next attempt
+- ❌ **FAILED**: Action failed (will retry in Pass 2)
+- ⛔ **PERMISSION ERROR**: Authentication/permission issue (no retry)
+- 🚫 **SKIPPED**: Token action automatically skipped for safety
+- 💡 **REFINING**: Knowledge refinement in progress
 
-### Final Summary Report
-- Overall success rate and pass breakdown
-- Cost estimates and AI model usage
-- Failed actions and permission errors list
-- Prompt strategy effectiveness
+### Batch Progress
+- **Batch Information**: Current batch number, range, and progress
+- **Dependency Status**: Shows which dependencies are met/missing
+- **Context Loading**: Indicates when context is loaded from previous batches
+- **Token Usage**: Real-time token consumption and cost tracking
+
+### Final Summary Reports
+- **Success Rate Analysis**: Overall and per-pass success rates
+- **Token Action Report**: Detailed breakdown of skipped actions
+- **Cost Breakdown**: Per-model and per-component cost analysis
+- **Failure Analysis**: Categorized failure reasons and recommendations
+- **Session Recovery**: Information for resuming interrupted sessions
+
+## 🔄 Session Management
+
+### Automatic Checkpointing
+- **Progress Saving**: Automatically saves progress every 30 seconds
+- **Context Persistence**: Maintains context across interruptions
+- **State Recovery**: Resume from exact interruption point
+- **History Tracking**: Complete session history with timestamps
+
+### Interrupt Handling
+- **Graceful Shutdown**: Ctrl+C triggers safe state saving
+- **Context Preservation**: All context and progress data preserved
+- **Resume Capability**: Seamless resumption from interruption point
+- **Error Recovery**: Robust error handling and recovery mechanisms
+
+## ⚙️ Advanced Configuration
+
+### Batch Size Optimization
+- **Small Platforms** (< 100 actions): 25-50 batch size
+- **Medium Platforms** (100-500 actions): 50-75 batch size
+- **Large Platforms** (500+ actions): 75-100 batch size
+- **Memory Constrained**: Use smaller batches (25-50)
+
+### Cost Optimization
+- **Model Selection**: Choose cost-effective models for simple tasks
+- **Batch Sizing**: Optimize batch sizes to reduce context overhead
+- **Token Tracking**: Monitor and optimize token usage patterns
+- **Context Compression**: Automatic compression of large contexts
 
 ## 🚨 Troubleshooting
 
-- **Permission Errors**: Check PicaOS integration permissions
-- **Dependency Issues**: Verify create actions and dependency graph
-- **High Failure Rate**: Review base knowledge for actions
+### Common Issues
+- **Permission Errors**: Check PicaOS integration permissions and token scopes
+- **Rate Limits**: System automatically handles rate limits with user choice
+- **Memory Issues**: Reduce batch size or enable context compression
+- **Token Skipping**: Review skipped actions report for safety reasons
 
-## 🔐 Security
+### Recovery Options
+- **Session Resume**: Use "Continue from last batch" option
+- **Context Recovery**: System automatically loads required context
+- **Failed Action Retry**: Use "Re-run failed actions" for targeted retries
+- **Fresh Start**: Use "Run all actions" for complete reset
 
-- Never commit `.env` file
-- Use `.gitignore` for sensitive directories
-- Rotate API keys regularly
-- Handle logs containing sensitive data appropriately
+## 🔐 Security & Best Practices
+
+### Security Measures
+- **Token Safety**: Automatic detection and skipping of destructive token actions
+- **Environment Variables**: Secure API key management
+- **Context Encryption**: Sensitive data protection in stored contexts
+- **Permission Validation**: Comprehensive permission checking
+
+### Best Practices
+- **Regular Key Rotation**: Rotate API keys periodically
+- **Batch Size Management**: Use appropriate batch sizes for your platform
+- **Context Cleanup**: Regular cleanup of old session data
+- **Cost Monitoring**: Monitor token usage and costs regularly
+
+
+## 🤝 Contributing
+
+This is a specialized testing framework for PicaOS integration. For issues or enhancements, please contact the ameya Raj or submit issues through the repository.
+
