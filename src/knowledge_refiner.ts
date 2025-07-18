@@ -14,8 +14,17 @@ const RefinementSchema = z.object({
   knowledge: z.string().nullable().describe("Updated knowledge text, or null if no changes needed"),
   promptStrategy: z.string().nullable().describe("New prompting approach suggestion, or null if no changes needed"),
   contextMapping: z.record(z.string()).optional().describe("Explicit mapping of context IDs to parameters"),
-  additionalSteps: z.array(z.string()).optional().describe("Additional verification or preparation steps")
+  additionalSteps: z.array(z.string()).optional().describe("Additional verification or preparation steps"),
+  enforcementRequired: z.boolean().optional().describe("Whether enforcement rules are needed for ID resolution")
 });
+
+interface EnforcementPattern {
+  resourceType: string;
+  idParameter: string;
+  nameParameter?: string;
+  listAction?: string;
+  searchPattern?: string;
+}
 
 export class KnowledgeRefiner {
   private llmModel: LanguageModel;
@@ -30,6 +39,161 @@ export class KnowledgeRefiner {
   this.useClaudeForRefinement = useClaudeForRefinement && !!process.env.ANTHROPIC_API_KEY;
   
   this.llmModel = initializeModel(this.useClaudeForRefinement, 'knowledge-refiner');
+}
+
+private standardizeKnowledgeFormat(knowledge: string): string {
+  let standardized = knowledge;
+  
+  standardized = standardized.replace(/### Context Usage Guidelines/g, '### Usage Guidelines');
+  standardized = standardized.replace(/### Context Value Usage Patterns/g, '### Value Usage Patterns');
+  standardized = standardized.replace(/### Example Request Body Using Context/g, '### Example Request Body');
+  standardized = standardized.replace(/### Generic Example/g, '### Example');
+  
+  const contextMappingSections = standardized.match(/## Context Mapping[\s\S]*?(?=##|$)/g) || [];
+  if (contextMappingSections.length > 1) {
+    standardized = standardized.replace(/## Context Mapping[\s\S]*?(?=##|$)/g, '');
+    
+    const combinedContent = contextMappingSections
+      .map(section => section.replace(/## Context Mapping\s*/, '').trim())
+      .filter(content => content.length > 0)
+      .join('\n');
+    
+    if (combinedContent) {
+      standardized += '\n\n## Context Mapping\n' + combinedContent;
+    }
+  }
+  
+  return standardized;
+}
+
+private detectIdParameters(action: ModelDefinition): EnforcementPattern[] {
+  const patterns: EnforcementPattern[] = [];
+  
+  const pathParams = action.path.match(/\{\{(\w+)\}\}/g) || [];
+  for (const param of pathParams) {
+    const paramName = param.replace(/[{}]/g, '');
+    if (paramName.toLowerCase().includes('id')) {
+      const resourceType = paramName.replace(/[iI]d$/, '').replace(/[iI]D$/, '');
+      patterns.push({
+        resourceType: resourceType || 'resource',
+        idParameter: paramName,
+        nameParameter: resourceType ? `${resourceType}Name` : 'resourceName'
+      });
+    }
+  }
+  
+  const method = action.action?.toUpperCase();
+  const needsId = method === 'GET' || method === 'PUT' || method === 'PATCH' || method === 'DELETE';
+  
+  if (needsId && patterns.length === 0) {
+    const pathSegments = action.path.split('/').filter(s => s && !s.includes('{'));
+    const lastSegment = pathSegments[pathSegments.length - 1];
+    const resourceType = lastSegment || action.modelName.toLowerCase();
+    
+    patterns.push({
+      resourceType,
+      idParameter: `${resourceType}Id`,
+      nameParameter: `${resourceType}Name`
+    });
+  }
+  
+  return patterns;
+}
+
+private generateEnforcementSection(patterns: EnforcementPattern[], action: ModelDefinition): string {
+  if (patterns.length === 0) return '';
+  
+  const method = action.action?.toUpperCase();
+  const isReadOperation = method === 'GET';
+  const isModifyOperation = method === 'PUT' || method === 'PATCH' || method === 'DELETE';
+  
+  let enforcement = '\n\n### Enforcements\n';
+  
+  for (const pattern of patterns) {
+    const { resourceType, idParameter, nameParameter } = pattern;
+    
+    enforcement += `- If a \`${idParameter}\` is provided, proceed directly with the ${action.title.toLowerCase()}\n`;
+    enforcement += `- If only a ${resourceType} name is provided:\n`;
+    enforcement += `  - List the ${resourceType}s in the platform\n`;
+    enforcement += `  - Search for exact name match\n`;
+    enforcement += `  - Extract the \`${idParameter}\` from the matched ${resourceType}\n`;
+    enforcement += `  - Use this ID in the ${isReadOperation ? 'request' : 'operation'}\n`;
+    enforcement += `- If neither \`${idParameter}\` nor ${resourceType} name is provided:\n`;
+    enforcement += `  - Prompt user: "Please provide either the ${resourceType} ID or exact ${resourceType} name"\n`;
+    
+    if (isModifyOperation) {
+      enforcement += `- Do not execute the ${action.title} without a valid \`${idParameter}\` substituted into the URL path\n`;
+    }
+    
+    if (isReadOperation && method === 'GET') {
+      enforcement += `- Ensure no request body is sent for the GET method\n`;
+    }
+    
+    enforcement += '\n';
+  }
+  
+  return enforcement;
+}
+
+private detectEnforcementNeeds(
+  errorMessage: string,
+  agentResponse: string,
+  action: ModelDefinition
+): boolean {
+  const error = errorMessage.toLowerCase();
+  const response = agentResponse.toLowerCase();
+  
+  const idNeededPatterns = [
+    /please provide.*id/i,
+    /need.*id/i,
+    /missing.*id/i,
+    /what.*id/i,
+    /specify.*id/i,
+    /enter.*id/i,
+    /give.*id/i
+  ];
+  
+  const needsIdResolution = idNeededPatterns.some(pattern => 
+    pattern.test(agentResponse) || pattern.test(errorMessage)
+  );
+  
+  const hasIdInPath = action.path.includes('{{') && action.path.includes('id');
+  
+  const method = action.action?.toUpperCase();
+  const isModifyingOperation = method === 'GET' || method === 'PUT' || method === 'PATCH' || method === 'DELETE';
+  
+  return needsIdResolution || (hasIdInPath && isModifyingOperation);
+}
+
+private enhanceKnowledgeWithEnforcements(
+  knowledge: string,
+  action: ModelDefinition,
+  errorMessage: string,
+  agentResponse?: string
+): string {
+  const needsEnforcement = this.detectEnforcementNeeds(errorMessage, agentResponse || '', action);
+  
+  if (!needsEnforcement) {
+    return this.standardizeKnowledgeFormat(knowledge);
+  }
+  
+  const patterns = this.detectIdParameters(action);
+  const enforcementSection = this.generateEnforcementSection(patterns, action);
+  
+  let enhanced = this.standardizeKnowledgeFormat(knowledge);
+  
+  if (enforcementSection) {
+    const paramGuidelinesIndex = enhanced.lastIndexOf('## Parameter Usage Guidelines');
+    if (paramGuidelinesIndex !== -1) {
+      enhanced = enhanced.slice(0, paramGuidelinesIndex) + 
+                 enforcementSection + 
+                 enhanced.slice(paramGuidelinesIndex);
+    } else {
+      enhanced += enforcementSection;
+    }
+  }
+  
+  return enhanced;
 }
 
 private async analyzeAgentResponse(
@@ -260,7 +424,11 @@ ${promptStrategy || 'Execute the action using the above values directly.'}`;
       });
     }
 
-    const generalizedKnowledge = enhancedKnowledge ? this.generalizeRefinedKnowledge(enhancedKnowledge, context) : undefined;
+    const enhancedWithEnforcements = enhancedKnowledge ? 
+      this.enhanceKnowledgeWithEnforcements(enhancedKnowledge, actionDetails, errorMessage, agentResponse) : 
+      this.enhanceKnowledgeWithEnforcements(originalKnowledge, actionDetails, errorMessage, agentResponse);
+
+    const generalizedKnowledge = this.generalizeRefinedKnowledge(enhancedWithEnforcements, context);
 
     if (generalizedKnowledge) {
       this.pendingKnowledge.set(actionDetails._id, {
@@ -469,7 +637,7 @@ saveAllPendingKnowledge(): void {
       const filename = `${cleanActionId}.md`;
       const filepath = path.join(knowledgeDir, filename);
       
-      const content = `# Refined Knowledge \n\n## Action ID: ${actionId}\n\n${data.knowledge}`;
+      const content = `# Refined Knowledge\n\n${data.knowledge}`;
       fs.writeFileSync(filepath, content);
       
       console.log(chalk.green(`   ✓ Saved: ${filename}`));

@@ -10,6 +10,7 @@ import { ExecutionLogger } from './execution_logger';
 import { BatchManager, ActionSelection, BatchStrategy } from './batch_manager';
 import { TestingHistoryManager } from './testing_history_manager';
 import { TokenActionDetector } from './utils/tokenActionDetector';
+import { PlatformSelector } from './utils/platform_selector';
 import readline from 'readline/promises';
 import chalk from 'chalk';
 import * as diff from 'diff';
@@ -111,7 +112,6 @@ export class EnhancedPicaosTestingOrchestrator {
         return;
       }
 
-      this.displayConnections(connections);
       const selectedConnection = await this.promptForConnectionSelection(connections);
       if (!selectedConnection) return;
 
@@ -151,23 +151,96 @@ export class EnhancedPicaosTestingOrchestrator {
     }
   }
 
- private displayConnections(connections: ConnectionDefinition[]): void {
-  console.log(chalk.bold("\n🔗 Available Platforms for Testing:"));
-  connections.forEach((conn, index) => {
-    console.log(`${chalk.cyan(String(index + 1).padStart(2))}. ${chalk.bold(conn.name)} - ${conn.platform}`);
-  });
-}
-
   private async promptForConnectionSelection(connections: ConnectionDefinition[]): Promise<ConnectionDefinition | null> {
     while (true) {
-      const choice = await rl.question('\n➡️ Select a platform by number (or type "exit"): ');
-      if (choice.toLowerCase() === 'exit') return null;
-      const selectedIndex = parseInt(choice) - 1;
+      PlatformSelector.showSelectionMenu();
+      const choice = await rl.question('\n➡️ Choose option (1-3): ');
+      
+      switch (choice) {
+        case '1':
+          const searchResult = await this.handleSearchMode(connections);
+          if (searchResult) return searchResult;
+          break;
+          
+        case '2':
+          const browseResult = await this.handleBrowseMode(connections);
+          if (browseResult) return browseResult;
+          break;
+          
+        case '3':
+          console.log(chalk.cyan('\n👋 Goodbye!'));
+          return null;
+          
+        default:
+          console.log(chalk.red('Invalid choice. Please select 1, 2, or 3.'));
+      }
+    }
+  }
 
-      if (selectedIndex >= 0 && selectedIndex < connections.length) {
+  private async handleSearchMode(connections: ConnectionDefinition[]): Promise<ConnectionDefinition | null> {
+    while (true) {
+      const searchTerm = await rl.question('\n🔍 Enter platform name or keyword (or type "back" to return): ');
+      
+      if (searchTerm.toLowerCase() === 'back') {
+        return null;
+      }
+      
+      const filteredPlatforms = PlatformSelector.filterPlatforms(connections, searchTerm);
+      
+      if (filteredPlatforms.length === 0) {
+        console.log(chalk.red('No platforms found matching your search.'));
+        
+        const suggestions = PlatformSelector.suggestSimilarPlatforms(connections, searchTerm);
+        if (suggestions.length > 0) {
+          console.log(chalk.yellow('\n💡 Did you mean one of these?'));
+          PlatformSelector.displayFilteredResults(suggestions);
+        }
+        
+        console.log(chalk.gray('\nTip: Try different keywords or use "back" to return to the main menu.'));
+        continue;
+      }
+      
+      PlatformSelector.displayFilteredResults(filteredPlatforms);
+      
+      const selection = await rl.question('\n➡️ Select platform by number (or type "search" for new search, "back" to return): ');
+      
+      if (selection.toLowerCase() === 'search') {
+        continue;
+      }
+      
+      if (selection.toLowerCase() === 'back') {
+        return null;
+      }
+      
+      if (PlatformSelector.isValidSelection(selection, filteredPlatforms.length)) {
+        const selectedIndex = parseInt(selection);
+        const selectedConnection = PlatformSelector.getConnectionByDisplayIndex(filteredPlatforms, selectedIndex);
+        
+        if (selectedConnection) {
+          return selectedConnection;
+        }
+      }
+      
+      console.log(chalk.red('Invalid selection. Please try again.'));
+    }
+  }
+
+  private async handleBrowseMode(connections: ConnectionDefinition[]): Promise<ConnectionDefinition | null> {
+    while (true) {
+      PlatformSelector.displayAllPlatforms(connections);
+      
+      const choice = await rl.question('\n➡️ Select platform by number (or type "back" to return): ');
+      
+      if (choice.toLowerCase() === 'back') {
+        return null;
+      }
+      
+      if (PlatformSelector.isValidSelection(choice, connections.length)) {
+        const selectedIndex = parseInt(choice) - 1;
         return connections[selectedIndex];
       }
-      console.log(chalk.red("Invalid selection. Please try again."));
+      
+      console.log(chalk.red('Invalid selection. Please try again.'));
     }
   }
 
