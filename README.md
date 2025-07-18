@@ -108,6 +108,130 @@ railway ssh
 npx ts-node src/main_runner.ts 
 ```
 
+## 📂 Accessing Test Data on Railway
+
+When you run tests on Railway, all data is stored in the cloud and persists across deployments. Here's how to access your test data:
+
+### 📍 Data Storage Locations
+
+Your test data is organized in these directories on Railway:
+
+```
+/app/
+├── data/
+│   ├── contexts/           # Context files (batch data, resources, IDs)
+│   │   ├── Platform_batch_1_context.json
+│   │   ├── Platform_batch_1_interrupt.json
+│   │   └── Platform_batch_1_compact.json
+│   └── logs/              # Execution logs and summaries
+│       ├── Platform.json
+│       └── Platform_summary.md
+├── knowledge/
+│   └── Platform/          # Refined knowledge files
+│       ├── action_knowledge_1.md
+│       └── action_knowledge_2.md
+└── logs/
+    └── history/           # Batch execution history
+        └── Platform_history.json
+```
+
+### 🔍 Viewing Data on Railway
+
+#### Option 1: Railway SSH Access
+```bash
+# Connect to Railway via SSH
+railway ssh
+
+# Navigate to data directories
+cd /app/data/contexts/
+ls -la                     # View context files
+
+cd /app/data/logs/
+ls -la                     # View execution logs
+
+cd /app/knowledge/
+ls -la                     # View knowledge files
+
+cd /app/logs/history/
+ls -la                     # View history files
+```
+
+### 📥 Downloading Data Locally
+
+#### Method 1: View and Copy Individual Files
+```bash
+# SSH into Railway
+railway ssh
+
+# View file contents (copy-paste to save locally)
+cat /app/data/logs/Platform_summary.md
+cat /app/data/contexts/Platform_batch_1_context.json
+cat /app/logs/history/Platform_history.json
+```
+
+#### Method 2: Railway CLI File Access
+```bash
+# Execute commands remotely and save output locally
+railway run cat /app/data/logs/Platform_summary.md > local_summary.md
+railway run cat /app/data/contexts/Platform_batch_1_context.json > local_context.json
+railway run cat /app/logs/history/Platform_history.json > local_history.json
+```
+
+#### Method 3: Bulk Download Script
+```bash
+# Create a simple download script
+railway ssh
+
+# Create a temporary archive
+tar -czf /tmp/test_data.tar.gz /app/data /app/knowledge /app/logs/history
+
+# Copy the archive (you'll need to copy the output manually)
+base64 /tmp/test_data.tar.gz
+```
+
+### 📋 Understanding the Data Files
+
+#### Context Files (`/app/data/contexts/`)
+- **`Platform_batch_N_context.json`**: Complete batch execution context
+- **`Platform_batch_N_interrupt.json`**: Recovery data for interrupted batches
+- **`Platform_batch_N_compact.json`**: Compressed context for memory efficiency
+
+#### Log Files (`/app/data/logs/`)
+- **`Platform.json`**: Detailed execution logs with timestamps
+- **`Platform_summary.md`**: Human-readable test summary report
+
+#### Knowledge Files (`/app/knowledge/Platform/`)
+- **`action_knowledge_N.md`**: Refined knowledge for individual actions
+- **`failed_action_knowledge_N.md`**: Knowledge from failed actions
+
+#### History Files (`/app/logs/history/`)
+- **`Platform_history.json`**: Complete session history and checkpoints
+
+### 🔄 Data Persistence
+
+- ✅ **Survives app restarts**: All data persists across Railway deployments
+- ✅ **Cross-session access**: Previous test results available in future sessions
+- ✅ **Automatic backups**: Railway handles infrastructure-level backups
+- ✅ **Version control**: Context files maintain execution history
+
+### 💡 Quick Data Access Tips
+
+```bash
+# Find all JSON files
+find /app -name "*.json" | grep -E "(context|log|history)"
+
+# Find all markdown files
+find /app -name "*.md"
+
+# View latest batch context
+ls -t /app/data/contexts/*.json | head -1 | xargs cat
+
+# View latest summary report
+ls -t /app/data/logs/*_summary.md | head -1 | xargs cat
+
+# Check total data size
+du -sh /app/data /app/knowledge /app/logs/history
+```
 
 ## 📁 Project Structure
 
@@ -273,4 +397,3 @@ src/
 ## 🤝 Contributing
 
 This is a specialized testing framework for PicaOS integration. For issues or enhancements, please contact the ameya Raj or submit issues through the repository.
-
