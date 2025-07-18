@@ -469,7 +469,7 @@ saveAllPendingKnowledge(): void {
       const filename = `${cleanActionId}.md`;
       const filepath = path.join(knowledgeDir, filename);
       
-      const content = `# Refined Knowledge (Interrupt Save)\n\n## Action ID: ${actionId}\n\n${data.knowledge}`;
+      const content = `# Refined Knowledge \n\n## Action ID: ${actionId}\n\n${data.knowledge}`;
       fs.writeFileSync(filepath, content);
       
       console.log(chalk.green(`   ✓ Saved: ${filename}`));
