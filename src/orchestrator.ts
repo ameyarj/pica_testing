@@ -18,7 +18,7 @@ import * as path from 'path';
 import { tokenTracker } from './global_token_tracker';
 
 function createRailwayReadlineInterface() {
-  if (process.env.RAILWAY_ENVIRONMENT_NAME) {
+  if (process.env.RAILWAY_ENVIRONMENT) {
     console.log(chalk.blue('🚂 Creating Railway-compatible readline interface...'));
   }
   

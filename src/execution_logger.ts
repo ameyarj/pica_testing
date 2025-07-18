@@ -60,7 +60,7 @@ export class ExecutionLogger {
     this.sessionId = safePlatformName;
     
     const isProduction = process.env.NODE_ENV === 'production';
-    const isRailway = process.env.RAILWAY_ENVIRONMENT_NAME;
+    const isRailway = process.env.RAILWAY_ENVIRONMENT;
     
     if (isProduction && isRailway) {
       this.logDir = path.join(process.cwd(), 'data', 'logs');

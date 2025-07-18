@@ -5,7 +5,7 @@ import chalk from 'chalk';
 dotenv.config();
 
 function setupRailwayTerminal() {
-  if (process.env.RAILWAY_ENVIRONMENT_NAME) {
+  if (process.env.RAILWAY_ENVIRONMENT) {
     console.log(chalk.blue('🚂 Detected Railway environment - setting up interactive terminal...'));
     
     if (process.stdin.setRawMode) {

@@ -24,7 +24,7 @@ export class ContextPersistenceManager {
 
   constructor() {
     const isProduction = process.env.NODE_ENV === 'production';
-    const isRailway = process.env.RAILWAY_ENVIRONMENT_NAME;
+    const isRailway = process.env.RAILWAY_ENVIRONMENT;
     
     if (isProduction && isRailway) {
       this.contextDir = path.join(process.cwd(), 'data', 'contexts');
