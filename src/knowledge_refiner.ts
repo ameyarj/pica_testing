@@ -593,7 +593,7 @@ persistRefinedKnowledge(platform: string, batchNumber: number, actionId: string,
   const filename = `${actionId.replace(/[^a-zA-Z0-9]/g, '_')}.md`;
   const filepath = path.join(knowledgeDir, filename);
   
-  const content = `# Refined Knowledge - Batch ${batchNumber}\n\n## Action ID: ${actionId}\n\n${refinedKnowledge}`;
+  const content = `# Refined Knowledge - Batch ${batchNumber}\n\n${refinedKnowledge}`;
   fs.writeFileSync(filepath, content);
 }
 
